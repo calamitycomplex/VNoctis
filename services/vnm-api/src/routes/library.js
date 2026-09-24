@@ -1,9 +1,5 @@
 import { rm, readdir, access } from 'node:fs/promises';
 import { join } from 'node:path';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-
-const execFileAsync = promisify(execFile);
 import { scanGamesDirectory } from '../services/scanner.js';
 import { runBatchEnrichment } from '../services/enrichment.js';
 import { downloadCover } from '../services/coverDownloader.js';
@@ -418,8 +414,9 @@ export default async function libraryRoutes(fastify) {
 
   /**
    * DELETE /library/:gameId
-   * Fully removes a game: source directory, web-build assets, covers,
-   * build logs, BuildJob records, and the Game database record.
+   * Removes a library entry and application-owned generated artifacts:
+   * web-build assets, cached covers/screenshots, build logs, and BuildJob records.
+   * The source game/archive directory is never modified or deleted.
    */
   fastify.delete('/library/:gameId', async (request, reply) => {
     const { gameId } = request.params;
@@ -446,28 +443,7 @@ export default async function libraryRoutes(fastify) {
     const coversPath = fastify.coversPath || '/covers';
     const screenshotsPath = fastify.screenshotsPath || '/screenshots';
 
-    // 1. Delete the game source folder (/games/<folder>)
-    //    ZIP archives (especially from Windows) can contain directories with
-    //    no write permission, causing recursive rm to fail with EACCES.
-    //    Ensure all entries are writable before attempting removal.
-    try {
-      try {
-        await access(game.directoryPath);
-        await execFileAsync('chmod', ['-R', 'u+rwX', game.directoryPath]);
-      } catch {
-        // Directory may not exist — rm with force will handle that
-      }
-      await rm(game.directoryPath, { recursive: true, force: true });
-      request.log.info({ path: game.directoryPath }, 'Deleted game source directory');
-    } catch (err) {
-      request.log.error({ err: err.message, path: game.directoryPath }, 'Failed to delete game source directory');
-      return reply.code(500).send({
-        code: 'DELETE_FAILED',
-        message: `Could not delete game source folder: ${err.message}`,
-      });
-    }
-
-    // 2. Delete web-build directory: /web-builds/<directoryName>/
+    // 1. Delete web-build directory: /web-builds/<directoryName>/
     try {
       await rm(join(webBuildsPath, game.directoryName), { recursive: true, force: true });
       request.log.info({ path: join(webBuildsPath, game.directoryName) }, 'Deleted web-build directory');
@@ -475,14 +451,14 @@ export default async function libraryRoutes(fastify) {
       request.log.warn({ err: err.message }, 'Failed to delete web-build directory');
     }
 
-    // 3. Delete web-build zip: /web-builds/<directoryName>.zip
+    // 2. Delete web-build zip: /web-builds/<directoryName>.zip
     try {
       await rm(join(webBuildsPath, `${game.directoryName}.zip`), { force: true });
     } catch (err) {
       request.log.warn({ err: err.message }, 'Failed to delete web-build zip');
     }
 
-    // 4. Delete cover images: /covers/<gameId>.*
+    // 3. Delete cover images: /covers/<gameId>.*
     try {
       const coverFiles = await readdir(coversPath);
       for (const file of coverFiles) {
@@ -494,7 +470,7 @@ export default async function libraryRoutes(fastify) {
       request.log.warn({ err: err.message }, 'Failed to clean up cover files');
     }
 
-    // 5. Delete cached screenshots: /screenshots/<gameId>/
+    // 4. Delete cached screenshots: /screenshots/<gameId>/
     try {
       await removeScreenshots(gameId, screenshotsPath);
       request.log.info({ gameId }, 'Deleted cached screenshots');
@@ -502,7 +478,7 @@ export default async function libraryRoutes(fastify) {
       request.log.warn({ err: err.message }, 'Failed to clean up screenshot files');
     }
 
-    // 6. Delete build logs for related BuildJobs
+    // 5. Delete build logs for related BuildJobs
     const buildJobs = await fastify.prisma.buildJob.findMany({
       where: { gameId },
       select: { id: true },
@@ -515,13 +491,13 @@ export default async function libraryRoutes(fastify) {
       }
     }
 
-    // 7. Delete BuildJob DB records
+    // 6. Delete BuildJob DB records
     await fastify.prisma.buildJob.deleteMany({ where: { gameId } });
 
-    // 8. Delete the Game DB record
+    // 7. Delete the Game DB record
     await fastify.prisma.game.delete({ where: { id: gameId } });
 
-    request.log.info({ gameId, title: game.extractedTitle }, 'Game fully deleted');
+    request.log.info({ gameId, title: game.extractedTitle }, 'Library entry deleted; source directory preserved');
     reply.code(204);
     return;
   });
