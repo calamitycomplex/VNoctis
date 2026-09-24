@@ -517,7 +517,8 @@ async function runScanAsync(jobId, gamesPath, prisma, vndbClient, coversPath, sc
         status: 'completed',
         gamesFound: result.found,
         gamesNew: result.new,
-        gamesRemoved: result.removed,
+        gamesUnavailable: result.unavailable,
+        gamesRemoved: 0, // Legacy field: scans now retain games with unavailable sources.
         completedAt: new Date(),
       },
     });

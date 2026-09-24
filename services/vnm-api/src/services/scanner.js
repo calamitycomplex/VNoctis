@@ -75,13 +75,13 @@ async function hasWebBuildZip(dirPath) {
  * 2. For each subdirectory, checks if it's a valid Ren'Py project.
  * 3. Generates a stable ID from the directory name.
  * 4. Extracts the game title from options.rpy (fallback: cleaned dir name).
- * 5. Upserts into DB: new games are created, existing games get path updated.
- * 6. Games in DB but no longer on disk are removed.
+ * 5. Upserts into DB: new games are created, existing games get path and availability updated.
+ * 6. Games in DB not discovered in this scan are marked unavailable and retained.
  *
  * @param {string} gamesPath - The root directory to scan (e.g. "/games").
  * @param {import('@prisma/client').PrismaClient} prisma - Prisma client instance.
  * @param {import('pino').Logger} [logger] - Optional logger.
- * @returns {Promise<{ found: number, new: number, removed: number, imported: number }>}
+ * @returns {Promise<{ found: number, new: number, unavailable: number, imported: number }>}
  */
 export async function scanGamesDirectory(gamesPath, prisma, logger) {
   const log = logger || console;
@@ -128,6 +128,7 @@ export async function scanGamesDirectory(gamesPath, prisma, logger) {
         where: { id },
         data: {
           directoryPath: dirPath,
+          sourceAvailable: true,
           // Only update extractedTitle if it was originally derived (not manually set)
           ...(existing.metadataSource !== 'manual'
             ? { extractedTitle }
@@ -140,6 +141,7 @@ export async function scanGamesDirectory(gamesPath, prisma, logger) {
         data: {
           id,
           directoryPath: dirPath,
+          sourceAvailable: true,
           directoryName: entry.name,
           extractedTitle,
         },
@@ -258,40 +260,16 @@ export async function scanGamesDirectory(gamesPath, prisma, logger) {
     }
   }
 
-  // Remove games that are no longer on disk
-  const allGames = await prisma.game.findMany({ select: { id: true } });
-  const removedIds = allGames
-    .map((g) => g.id)
-    .filter((id) => !discoveredIds.includes(id));
-
-  if (removedIds.length > 0) {
-    // Clean up BuildJob records and build logs for removed games
-    for (const gameId of removedIds) {
-      try {
-        const buildJobs = await prisma.buildJob.findMany({
-          where: { gameId },
-          select: { id: true },
-        });
-        for (const job of buildJobs) {
-          try {
-            await rm(join(webBuildsPath, 'logs', `${job.id}.log`), { force: true });
-          } catch {
-            // Best-effort log cleanup
-          }
-        }
-        await prisma.buildJob.deleteMany({ where: { gameId } });
-      } catch (err) {
-        log.warn?.({ gameId, err: err?.message }, 'Failed to clean up BuildJobs for removed game');
-      }
-    }
-
-    await prisma.game.deleteMany({
-      where: { id: { in: removedIds } },
-    });
-    log.info?.({ count: removedIds.length }, 'Removed games no longer on disk');
+  // Preserve missing games, their metadata, BuildJobs, and generated artifacts.
+  const unavailable = await prisma.game.updateMany({
+    where: { id: { notIn: discoveredIds } },
+    data: { sourceAvailable: false },
+  });
+  if (unavailable.count > 0) {
+    log.info?.({ count: unavailable.count }, 'Marked undiscovered game sources unavailable');
   }
 
-  // Build a set of active game IDs for orphan detection
+  // Include unavailable games in orphan detection so their cached assets are retained
   const activeGames = await prisma.game.findMany({
     select: { id: true, directoryName: true },
   });
@@ -364,7 +342,7 @@ export async function scanGamesDirectory(gamesPath, prisma, logger) {
   return {
     found: discoveredIds.length,
     new: newCount,
-    removed: removedIds.length,
+    unavailable: unavailable.count,
     imported: importedCount,
     orphansRemoved,
   };

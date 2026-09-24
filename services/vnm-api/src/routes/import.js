@@ -127,7 +127,7 @@ async function extractAndScan(tmpPath, originalName, gamesPath, fastify, logger)
   scanGamesDirectory(gamesPath, fastify.prisma, fastify.log)
     .then(async (result) => {
       fastify.log.info(
-        { found: result.found, new: result.new, removed: result.removed },
+        { found: result.found, new: result.new, unavailable: result.unavailable },
         'Post-import scan completed'
       );
       if (fastify.vndbClient && fastify.coversPath) {

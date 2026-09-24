@@ -534,7 +534,7 @@ const start = async () => {
     scanGamesDirectory(gamesPath, prisma, fastify.log)
       .then((result) => {
         fastify.log.info(
-          { found: result.found, new: result.new, removed: result.removed },
+          { found: result.found, new: result.new, unavailable: result.unavailable },
           'Initial library scan completed'
         );
 
@@ -569,7 +569,7 @@ const start = async () => {
             try {
               const scanResult = await scanGamesDirectory(gamesPath, prisma, fastify.log);
               fastify.log.info(
-                { found: scanResult.found, new: scanResult.new, removed: scanResult.removed },
+                { found: scanResult.found, new: scanResult.new, unavailable: scanResult.unavailable },
                 'Watcher-triggered rescan completed'
               );
 

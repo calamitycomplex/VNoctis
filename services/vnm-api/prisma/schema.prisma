@@ -11,6 +11,7 @@ model Game {
   id                String         @id                    // Stable fingerprint UUID
   directoryPath     String         @unique                // Absolute path in container
   directoryName     String                                // Raw directory name
+  sourceAvailable   Boolean        @default(true)         // Source discovered in the latest completed scan
   extractedTitle    String                                // Title from options.rpy or dir name
   vndbId            String?                               // e.g. "v17"
   steamAppId        String?                               // Steam application ID
@@ -78,6 +79,7 @@ model ScanJob {
   gamesFound      Int       @default(0)
   gamesNew        Int       @default(0)
   gamesRemoved    Int       @default(0)
+  gamesUnavailable Int      @default(0)
   error           String?
   startedAt       DateTime  @default(now())
   completedAt     DateTime?
