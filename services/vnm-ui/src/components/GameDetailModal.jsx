@@ -120,20 +120,20 @@ export default function GameDetailModal({ gameId, onClose, onDeleted, onHide, on
   }, [navigate, gameId]);
 
   const handleBuild = useCallback(() => {
-    if (buildTriggered) return;
+    if (buildTriggered || game?.sourceAvailable === false) return;
     setShowBuildOptions(true);
-  }, [buildTriggered]);
+  }, [buildTriggered, game?.sourceAvailable]);
 
   const handleConfirmBuild = useCallback(async () => {
     setShowBuildOptions(false);
-    if (buildTriggered) return;
+    if (buildTriggered || game?.sourceAvailable === false) return;
     setBuildTriggered(true);
     try {
       await api.post(`/build/${gameId}`, { compressAssets });
     } catch {
       // Best-effort — toast would be nice but out of scope
     }
-  }, [gameId, buildTriggered, compressAssets]);
+  }, [gameId, buildTriggered, compressAssets, game?.sourceAvailable]);
 
   const handleRefreshMetadata = useCallback(async () => {
     if (refreshTriggered) return;
@@ -367,7 +367,7 @@ export default function GameDetailModal({ gameId, onClose, onDeleted, onHide, on
                     onClick={handlePlay}
                     className="px-5 py-2.5 bg-blue-600 hover:bg-blue-500 text-white font-semibold rounded-lg transition-colors duration-200 text-sm"
                   >
-                    {isBuilt ? '▶ Play' : '▶ Build & Play'}
+                    {isBuilt ? '▶ Play' : game.sourceAvailable === false ? '▶ Player options' : '▶ Build & Play'}
                   </button>
                   {isAdmin && (
                     buildTriggered ? (
@@ -385,7 +385,9 @@ export default function GameDetailModal({ gameId, onClose, onDeleted, onHide, on
                     ) : (
                       <button
                         onClick={handleBuild}
-                        className="px-4 py-2.5 bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600 text-gray-700 dark:text-white font-medium rounded-lg transition-colors duration-200 text-sm"
+                        disabled={game.sourceAvailable === false}
+                        title={game.sourceAvailable === false ? "Source unavailable: building requires the source directory." : undefined}
+                        className="disabled:opacity-50 disabled:cursor-not-allowed px-4 py-2.5 bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600 text-gray-700 dark:text-white font-medium rounded-lg transition-colors duration-200 text-sm"
                       >
                         {isBuilt ? '🔨 Rebuild' : '🔨 Build'}
                       </button>
@@ -642,6 +644,9 @@ export default function GameDetailModal({ gameId, onClose, onDeleted, onHide, on
 
                 {/* 8. Game info footer */}
                 <div className="border-t border-gray-200 dark:border-gray-800 pt-4 space-y-1">
+                  <p className="text-xs text-gray-400 dark:text-gray-500">
+                    Source: {game.sourceAvailable === false ? 'Source unavailable' : game.sourceAvailable === true ? 'Available' : 'Unknown'}
+                  </p>
                   {game.directoryPath && (
                     <p className="text-xs text-gray-400 dark:text-gray-500 truncate">
                       <span className="text-gray-500 dark:text-gray-600">Directory:</span> {game.directoryPath}
@@ -756,7 +761,8 @@ export default function GameDetailModal({ gameId, onClose, onDeleted, onHide, on
               </button>
               <button
                 onClick={handleConfirmBuild}
-                className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-sm font-semibold transition-colors"
+                disabled={game.sourceAvailable === false}
+                className="disabled:opacity-50 disabled:cursor-not-allowed px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-sm font-semibold transition-colors"
               >
                 🔨 Start Build
               </button>

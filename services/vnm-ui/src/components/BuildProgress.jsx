@@ -9,6 +9,7 @@ import StarBackground from './StarBackground';
  * @param {{
  *   buildState: 'not_built'|'queued'|'building'|'failed'|'stale',
  *   gameTitle: string,
+ *   sourceAvailable?: boolean,
  *   jobId: string|null,
  *   onBuild: (opts: { compressAssets: boolean }) => void,
  *   onCancel: () => void,
@@ -20,6 +21,7 @@ import StarBackground from './StarBackground';
 export default function BuildProgress({
   buildState,
   gameTitle,
+  sourceAvailable,
   jobId,
   onBuild,
   onCancel,
@@ -31,8 +33,11 @@ export default function BuildProgress({
     <div className="relative flex items-center justify-center min-h-full p-4">
       <StarBackground />
       <div className="relative z-10">
+        {sourceAvailable === false && (
+          <p className="mb-3 text-sm text-amber-300 text-center">Source unavailable. Building requires the source directory.</p>
+        )}
         {buildState === 'not_built' && (
-          <NotBuiltCard title={gameTitle} onBuild={onBuild} onMarkPlayable={onMarkPlayable} />
+          <NotBuiltCard sourceAvailable={sourceAvailable} title={gameTitle} onBuild={onBuild} onMarkPlayable={onMarkPlayable} />
         )}
         {buildState === 'queued' && (
           <QueuedCard onCancel={onCancel} />
@@ -41,10 +46,10 @@ export default function BuildProgress({
           <BuildingCard title={gameTitle} jobId={jobId} onCancel={onCancel} />
         )}
         {buildState === 'failed' && (
-          <FailedCard jobId={jobId} onRetry={onRetry} />
+          <FailedCard sourceAvailable={sourceAvailable} jobId={jobId} onRetry={onRetry} />
         )}
         {buildState === 'stale' && (
-          <StaleCard title={gameTitle} onBuild={onBuild} onPlayAnyway={onPlayAnyway} />
+          <StaleCard sourceAvailable={sourceAvailable} title={gameTitle} onBuild={onBuild} onPlayAnyway={onPlayAnyway} />
         )}
       </div>
     </div>
@@ -55,7 +60,7 @@ export default function BuildProgress({
 /*  Not Built                                                         */
 /* ------------------------------------------------------------------ */
 
-function NotBuiltCard({ title, onBuild, onMarkPlayable }) {
+function NotBuiltCard({ title, onBuild, onMarkPlayable, sourceAvailable }) {
   const [compressAssets, setCompressAssets] = useState(true);
   const [markError, setMarkError] = useState(null);
   const [marking, setMarking] = useState(false);
@@ -115,7 +120,8 @@ function NotBuiltCard({ title, onBuild, onMarkPlayable }) {
       <div className="flex flex-col items-center gap-3">
         <button
           onClick={() => onBuild({ compressAssets })}
-          className="px-6 py-2.5 bg-blue-600 hover:bg-blue-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 text-white font-semibold rounded-lg transition-colors duration-200"
+          disabled={sourceAvailable === false}
+          className="disabled:opacity-50 disabled:cursor-not-allowed px-6 py-2.5 bg-blue-600 hover:bg-blue-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 text-white font-semibold rounded-lg transition-colors duration-200"
         >
           Build Now
         </button>
@@ -251,7 +257,7 @@ function BuildingCard({ title, jobId, onCancel }) {
 /*  Failed                                                            */
 /* ------------------------------------------------------------------ */
 
-function FailedCard({ jobId, onRetry }) {
+function FailedCard({ jobId, onRetry, sourceAvailable }) {
   const { lines } = useBuildLog(jobId);
   const [expanded, setExpanded] = useState(false);
 
@@ -316,7 +322,8 @@ function FailedCard({ jobId, onRetry }) {
       <div className="mt-4">
         <button
           onClick={onRetry}
-          className="px-6 py-2.5 bg-blue-600 hover:bg-blue-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 text-white font-semibold rounded-lg transition-colors duration-200"
+          disabled={sourceAvailable === false}
+          className="disabled:opacity-50 disabled:cursor-not-allowed px-6 py-2.5 bg-blue-600 hover:bg-blue-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 text-white font-semibold rounded-lg transition-colors duration-200"
         >
           Retry Build
         </button>
@@ -329,7 +336,7 @@ function FailedCard({ jobId, onRetry }) {
 /*  Stale                                                             */
 /* ------------------------------------------------------------------ */
 
-function StaleCard({ title, onBuild, onPlayAnyway }) {
+function StaleCard({ title, onBuild, onPlayAnyway, sourceAvailable }) {
   const [compressAssets, setCompressAssets] = useState(true);
 
   return (
@@ -374,7 +381,8 @@ function StaleCard({ title, onBuild, onPlayAnyway }) {
       <div className="flex items-center justify-center gap-3">
         <button
           onClick={() => onBuild({ compressAssets })}
-          className="px-6 py-2.5 bg-blue-600 hover:bg-blue-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 text-white font-semibold rounded-lg transition-colors duration-200"
+          disabled={sourceAvailable === false}
+          className="disabled:opacity-50 disabled:cursor-not-allowed px-6 py-2.5 bg-blue-600 hover:bg-blue-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 text-white font-semibold rounded-lg transition-colors duration-200"
         >
           Rebuild
         </button>

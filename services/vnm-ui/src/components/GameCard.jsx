@@ -91,6 +91,11 @@ export default function GameCard({ game, onClick, onHide, onFavorite, isAdmin = 
 
         {/* Status overlays — below favorite heart in top-left of image area */}
         <div className="absolute top-2 left-11 flex flex-col gap-1">
+          {game.sourceAvailable === false && (
+            <span className="px-2 py-0.5 rounded text-xs font-semibold bg-amber-100 text-amber-900 shadow">
+              Source unavailable
+            </span>
+          )}
           {game.metadataSource === 'unmatched' && (
             <span className="px-2 py-0.5 rounded text-xs font-semibold bg-orange-600 text-white shadow">
               Unmatched

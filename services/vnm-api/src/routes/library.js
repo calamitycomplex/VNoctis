@@ -68,8 +68,9 @@ export default async function libraryRoutes(fastify) {
    *   order        - asc | desc (default: asc)
    *   buildStatus  - Filter by build status
    *   metadataSource - Filter by metadata source
+   *   sourceAvailable - true | false (omit for all availability states)
    */
-  fastify.get('/library', async (request) => {
+  fastify.get('/library', async (request, reply) => {
     const {
       search,
       sort = 'title',
@@ -77,6 +78,7 @@ export default async function libraryRoutes(fastify) {
       buildStatus,
       metadataSource,
       includeHidden,
+      sourceAvailable,
     } = request.query;
 
     // Build the where clause
@@ -84,6 +86,15 @@ export default async function libraryRoutes(fastify) {
 
     if (search) {
       where.extractedTitle = { contains: search };
+    }
+
+    if (sourceAvailable !== undefined) {
+      if (sourceAvailable !== 'true' && sourceAvailable !== 'false') {
+        return reply.code(400).send({
+          error: { code: 'INVALID_SOURCE_AVAILABLE', message: 'sourceAvailable must be true or false.' },
+        });
+      }
+      where.sourceAvailable = sourceAvailable === 'true';
     }
 
     if (buildStatus) {

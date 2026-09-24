@@ -369,6 +369,7 @@ export default function Player() {
         ) : (
           <BuildProgress
             buildState={buildState}
+            sourceAvailable={game.sourceAvailable}
             gameTitle={title}
             jobId={jobId}
             onBuild={triggerBuild}
