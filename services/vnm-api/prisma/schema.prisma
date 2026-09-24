@@ -7,45 +7,68 @@ generator client {
   provider = "prisma-client-js"
 }
 
+model Title {
+  id           String        @id @default(uuid())
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  archiveItems ArchiveItem[]
+}
+
+model ArchiveItem {
+  id              String   @id @default(uuid())
+  titleId         String
+  directoryPath   String   @unique
+  directoryName   String
+  sourceAvailable Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  title           Title    @relation(fields: [titleId], references: [id], onDelete: Restrict)
+  game            Game?
+
+  @@index([titleId])
+}
+
 model Game {
-  id                String         @id                    // Stable fingerprint UUID
-  directoryPath     String         @unique                // Absolute path in container
-  directoryName     String                                // Raw directory name
-  sourceAvailable   Boolean        @default(true)         // Source discovered in the latest completed scan
-  extractedTitle    String                                // Title from options.rpy or dir name
-  vndbId            String?                               // e.g. "v17"
-  steamAppId        String?                               // Steam application ID
-  vndbTitle         String?                               // English title from VNDB
-  vndbTitleOriginal String?                               // Japanese/original title
-  synopsis          String?                               // Full synopsis
-  developer         String?                               // Developer studio
-  releaseDate       DateTime?                             // First release date
-  lengthMinutes     Int?                                  // Estimated play time
-  vndbRating        Float?                                // Score 0-10
-  coverPath         String?                               // Local path to cached cover
-  tags              String         @default("[]")         // JSON array of { id, name, spoiler }
-  screenshots       String         @default("[]")         // JSON array of screenshot URLs
-  buildStatus       String         @default("not_built")  // not_built|queued|building|built|failed|stale
-  hidden            Boolean        @default(false)        // User-hidden from library view
+  id                String         @id // Legacy directory-name fingerprint
+  directoryPath     String         @unique // Absolute path in container
+  directoryName     String // Raw directory name
+  sourceAvailable   Boolean        @default(true) // Source discovered in the latest completed scan
+  extractedTitle    String // Title from options.rpy or dir name
+  vndbId            String? // e.g. "v17"
+  steamAppId        String? // Steam application ID
+  vndbTitle         String? // English title from VNDB
+  vndbTitleOriginal String? // Japanese/original title
+  synopsis          String? // Full synopsis
+  developer         String? // Developer studio
+  releaseDate       DateTime? // First release date
+  lengthMinutes     Int? // Estimated play time
+  vndbRating        Float? // Score 0-10
+  coverPath         String? // Local path to cached cover
+  tags              String         @default("[]") // JSON array of { id, name, spoiler }
+  screenshots       String         @default("[]") // JSON array of screenshot URLs
+  buildStatus       String         @default("not_built") // not_built|queued|building|built|failed|stale
+  hidden            Boolean        @default(false) // User-hidden from library view
   publishStatus     String         @default("not_published") // not_published|publishing|published|failed (R2 mode only)
-  publishedAt       DateTime?                             // Last successful publish time
-  publishedVersion  String?                               // Hash of published build
-  favorite          Boolean        @default(false)        // DEPRECATED — kept for data migration; will be dropped in a follow-up migration
-  buildJobId        String?                               // Most recent build job ID
-  builtAt           DateTime?                             // Last successful build time
-  webBuildPath      String?                               // URL to compiled web export
-  metadataSource    String         @default("unmatched")  // auto|manual|unmatched
-  metadataFetchedAt DateTime?                             // Last VNDB fetch time
+  publishedAt       DateTime? // Last successful publish time
+  publishedVersion  String? // Hash of published build
+  favorite          Boolean        @default(false) // DEPRECATED — kept for data migration; will be dropped in a follow-up migration
+  buildJobId        String? // Most recent build job ID
+  builtAt           DateTime? // Last successful build time
+  webBuildPath      String? // URL to compiled web export
+  metadataSource    String         @default("unmatched") // auto|manual|unmatched
+  metadataFetchedAt DateTime? // Last VNDB fetch time
   createdAt         DateTime       @default(now())
   updatedAt         DateTime       @updatedAt
-  favoritedBy       UserFavorite[]                        // Per-user favorites (replaces global favorite)
+  favoritedBy       UserFavorite[] // Per-user favorites (replaces global favorite)
+  archiveItemId     String?        @unique
+  archiveItem       ArchiveItem?   @relation(fields: [archiveItemId], references: [id], onDelete: Restrict)
 }
 
 model User {
   id           String         @id @default(uuid())
   username     String         @unique
-  passwordHash String                                     // bcrypt hash (cost factor 12)
-  role         String         @default("viewer")          // "admin" | "viewer"
+  passwordHash String // bcrypt hash (cost factor 12)
+  role         String         @default("viewer") // "admin" | "viewer"
   createdAt    DateTime       @default(now())
   updatedAt    DateTime       @updatedAt
   favorites    UserFavorite[]
@@ -64,25 +87,25 @@ model UserFavorite {
 model BuildJob {
   id          String    @id @default(uuid())
   gameId      String
-  status      String    @default("queued")    // queued|building|done|failed|cancelled
-  logPath     String?                         // Path to build log file
+  status      String    @default("queued") // queued|building|done|failed|cancelled
+  logPath     String? // Path to build log file
   startedAt   DateTime?
   completedAt DateTime?
-  error       String?                         // Error message if failed
+  error       String? // Error message if failed
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 }
 
 model ScanJob {
-  id              String    @id @default(uuid())
-  status          String    @default("running")  // running|completed|failed
-  gamesFound      Int       @default(0)
-  gamesNew        Int       @default(0)
-  gamesRemoved    Int       @default(0)
-  gamesUnavailable Int      @default(0)
-  error           String?
-  startedAt       DateTime  @default(now())
-  completedAt     DateTime?
+  id               String    @id @default(uuid())
+  status           String    @default("running") // running|completed|failed
+  gamesFound       Int       @default(0)
+  gamesNew         Int       @default(0)
+  gamesRemoved     Int       @default(0)
+  gamesUnavailable Int       @default(0)
+  error            String?
+  startedAt        DateTime  @default(now())
+  completedAt      DateTime?
 }
 
 // ── R2 Publish models (only present in vnm-r2.db) ────────
@@ -91,7 +114,7 @@ model ScanJob {
 
 model Setting {
   key       String   @id
-  value     String                  // AES-256-GCM encrypted for secrets
+  value     String // AES-256-GCM encrypted for secrets
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
@@ -99,8 +122,8 @@ model Setting {
 model PublishJob {
   id            String    @id @default(uuid())
   gameId        String
-  status        String    @default("queued")    // queued|uploading|done|failed|cancelled
-  progress      Int       @default(0)           // 0-100 percentage
+  status        String    @default("queued") // queued|uploading|done|failed|cancelled
+  progress      Int       @default(0) // 0-100 percentage
   filesTotal    Int       @default(0)
   filesUploaded Int       @default(0)
   error         String?
