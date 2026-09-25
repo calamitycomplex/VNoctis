@@ -3,7 +3,7 @@ import cors from '@fastify/cors';
 import multipart from '@fastify/multipart';
 import rateLimit from '@fastify/rate-limit';
 import { PrismaClient } from '@prisma/client';
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { mkdirSync, accessSync, constants, readFileSync, writeFileSync, existsSync, copyFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import jwt from 'jsonwebtoken';
@@ -27,6 +27,7 @@ import { SteamClient } from './services/steamClient.js';
 import { runBatchEnrichment } from './services/enrichment.js';
 import { checkStaleBuilds } from './services/buildOrchestrator.js';
 import { DirectoryWatcher } from './services/watcher.js';
+import { deployMigrations, ensureGamePublishColumns } from './services/migrationCompat.js';
 
 // ── R2 database selection ─────────────────────────────
 // Must happen before PrismaClient is instantiated so it reads the correct URL.
@@ -363,15 +364,27 @@ const start = async () => {
       );
     }
 
-    // Run pending Prisma migrations before starting
+    // Run pending Prisma migrations before starting.
+    //
+    // Databases that already gained the Game publish columns from the legacy R2
+    // startup block are recovered without a table rebuild: the additive
+    // migration's duplicate-column error is detected, the migration is marked
+    // applied, and deploy is retried. See services/migrationCompat.js.
     fastify.log.info('Running database migrations…');
     try {
-      execSync('npx prisma migrate deploy', {
+      const { recovered, mode } = await deployMigrations({
+        prisma,
+        exec: (args, options) => execFileSync('npx', args, options),
+        logger: fastify.log,
         cwd: process.cwd(),
-        stdio: 'pipe',
         env: { ...process.env },
       });
-      fastify.log.info('Database migrations applied successfully');
+      fastify.log.info(
+        { mode },
+        recovered
+          ? 'Database migrations applied successfully (legacy publish columns already present)'
+          : 'Database migrations applied successfully'
+      );
     } catch (migrationErr) {
       fastify.log.error(
         { err: migrationErr.message },
@@ -408,14 +421,16 @@ const start = async () => {
             "updatedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
           )
         `);
-        // ALTER TABLE ADD COLUMN is idempotent in SQLite only when column is absent;
-        // use try/catch for each column so existing installs don't fail.
-        for (const col of [
-          `ALTER TABLE "Game" ADD COLUMN "publishStatus" TEXT NOT NULL DEFAULT 'not_published'`,
-          `ALTER TABLE "Game" ADD COLUMN "publishedAt" DATETIME`,
-          `ALTER TABLE "Game" ADD COLUMN "publishedVersion" TEXT`,
-        ]) {
-          try { await prisma.$executeRawUnsafe(col); } catch { /* column already exists */ }
+        // Legacy fallback: these columns are created by the standard migration
+        // chain now, so on an up-to-date database this is a no-op. Only columns
+        // that are actually missing are added (SQLite has no
+        // ADD COLUMN IF NOT EXISTS), so R2 startup never blindly re-adds them.
+        const publishColumnsAdded = await ensureGamePublishColumns(prisma);
+        if (publishColumnsAdded.length > 0) {
+          fastify.log.info(
+            { columns: publishColumnsAdded },
+            'Added missing R2 Game publish columns'
+          );
         }
         fastify.log.info('R2 schema additions applied successfully');
       } catch (r2SchemaErr) {
