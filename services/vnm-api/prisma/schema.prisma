@@ -9,6 +9,7 @@ generator client {
 
 model Title {
   id           String        @id @default(uuid())
+  name         String? // Display identity; initialized from scan extraction, not unique
   createdAt    DateTime      @default(now())
   updatedAt    DateTime      @updatedAt
   archiveItems ArchiveItem[]

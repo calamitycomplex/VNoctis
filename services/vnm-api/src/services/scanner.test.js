@@ -1,12 +1,35 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtemp, mkdir, writeFile, readFile, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, stat, readlink, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { scanGamesDirectory } from './scanner.js';
 
 const fingerprint = (name) => createHash('sha256').update(name).digest('hex').slice(0, 32);
+
+const matches = (row, where) => Object.entries(where).every(([key, value]) => row[key] === value);
+
+/** Minimal in-memory Prisma stand-in; transactions commit on success, roll back on throw. */
+function model(rows, defaults = {}, prefix = 'row') {
+  let seq = 0;
+  return {
+    findUnique: async ({ where }) => rows.find((row) => matches(row, where)) || null,
+    findMany: async ({ where } = {}) =>
+      rows.filter((row) => !where?.id?.notIn || !where.id.notIn.includes(row.id)),
+    create: async ({ data }) => {
+      const row = { id: `${prefix}-${seq++}`, ...defaults, ...data };
+      rows.push(row);
+      return row;
+    },
+    update: async ({ where, data }) => {
+      const row = rows.find((candidate) => matches(candidate, where));
+      assert.ok(row, 'update target must exist');
+      Object.assign(row, data);
+      return row;
+    },
+  };
+}
 
 async function fixture(t) {
   const root = await mkdtemp(join(tmpdir(), 'vnoctis-scanner-'));
@@ -27,24 +50,15 @@ async function fixture(t) {
   });
   const state = { games: [], items: [], titles: [] };
   const warnings = [];
-  const model = (rows) => ({
-    findUnique: async ({ where }) => rows.find((row) => row.id === where.id) || null,
-    findMany: async ({ where } = {}) => rows.filter((row) => !where || !where.id.notIn.includes(row.id)),
-    create: async ({ data }) => { rows.push({ archiveItemId: null, buildStatus: 'not_built', ...data }); },
-    update: async ({ where, data }) => {
-      const row = rows.find((row) => row.id === where.id);
-      assert.ok(row);
-      Object.assign(row, data);
-    },
-  });
   const prisma = {
-    game: model(state.games), archiveItem: model(state.items),
-    title: { findUnique: async ({ where }) => state.titles.find((row) => row.id === where.id) || null },
+    game: model(state.games, { archiveItemId: null, buildStatus: 'not_built' }),
+    archiveItem: model(state.items, {}, 'item'),
+    title: model(state.titles, { name: null }, 'title'),
     $transaction: async (fn) => {
       const before = structuredClone(state);
       try { return await fn(prisma); }
       catch (error) {
-        for (const key of Object.keys(state)) state[key].splice(0, state[key].length, ...before[key]);
+        for (const key of Object.keys(state)) state[key].splice(0, state[key].length, ...structuredClone(before[key]));
         throw error;
       }
     },
@@ -58,10 +72,22 @@ async function fixture(t) {
     };
     state.games.push(game);
     state.items.push({ id: 'item', titleId: 'title', directoryPath: game.directoryPath, directoryName: name, sourceAvailable: available });
-    state.titles.push({ id: 'title' });
+    state.titles.push({ id: 'title', name: 'Seed Title' });
     return game;
   };
-  return { source, state, seed, warnings, prisma, scan: () => scanGamesDirectory(source, prisma, { info() {}, warn: (...args) => warnings.push(args) }) };
+  return { root, source, state, seed, warnings, prisma, scan: () => scanGamesDirectory(source, prisma, { info() {}, warn: (...args) => warnings.push(args) }) };
+}
+
+async function treeSnapshot(root) {
+  const entries = await readdir(root, { withFileTypes: true });
+  const snapshot = {};
+  for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+    const path = join(root, entry.name);
+    if (entry.isDirectory()) snapshot[entry.name] = await treeSnapshot(path);
+    else if (entry.isSymbolicLink()) snapshot[entry.name] = { symlink: await readlink(path) };
+    else snapshot[entry.name] = { size: (await stat(path)).size, sha256: createHash('sha256').update(await readFile(path)).digest('hex') };
+  }
+  return snapshot;
 }
 
 test('inventories arbitrary and empty directories, preserves RenPy title extraction, ignores files', async (t) => {
@@ -76,13 +102,50 @@ test('inventories arbitrary and empty directories, preserves RenPy title extract
   assert.equal(result.new, 3);
   assert.equal(f.state.games.find((g) => g.directoryName === 'Other_Engine').extractedTitle, 'Other Engine');
   assert.equal(f.state.games.find((g) => g.directoryName === 'RenPy').extractedTitle, 'Extracted VN');
+  assert.equal(f.state.items.length, 3);
+  assert.equal(f.state.titles.length, 3);
   for (const game of f.state.games) {
     assert.equal(game.id, fingerprint(game.directoryName));
     assert.equal(game.sourceAvailable, true);
-    assert.equal(game.archiveItemId, null);
+    const item = f.state.items.find((candidate) => candidate.id === game.archiveItemId);
+    assert.ok(item, 'each Game must be linked to an ArchiveItem');
+    assert.equal(item.directoryPath, game.directoryPath);
+    assert.equal(item.directoryName, game.directoryName);
+    assert.equal(item.sourceAvailable, true);
+    const title = f.state.titles.find((candidate) => candidate.id === item.titleId);
+    assert.ok(title, 'each ArchiveItem must belong to a Title');
+    assert.equal(title.name, game.extractedTitle);
   }
-  assert.equal(f.state.items.length, 0);
-  assert.equal(f.state.titles.length, 0);
+});
+
+test('a single fresh source creates exactly one Game, ArchiveItem and Title', async (t) => {
+  const f = await fixture(t);
+  await mkdir(join(f.source, 'Solo'));
+  const result = await f.scan();
+  assert.equal(result.new, 1);
+  assert.equal(f.state.games.length, 1);
+  assert.equal(f.state.items.length, 1);
+  assert.equal(f.state.titles.length, 1);
+  const [game] = f.state.games;
+  assert.equal(game.archiveItemId, f.state.items[0].id);
+  assert.equal(f.state.items[0].titleId, f.state.titles[0].id);
+  assert.equal(f.state.titles[0].name, 'Solo');
+});
+
+test('idempotent rescan keeps one Game/ArchiveItem/Title and the same IDs', async (t) => {
+  const f = await fixture(t);
+  await mkdir(join(f.source, 'Repeat'));
+  await f.scan();
+  const ids = { game: f.state.games[0].id, item: f.state.items[0].id, title: f.state.titles[0].id };
+  await f.scan();
+  await f.scan();
+  assert.equal(f.state.games.length, 1);
+  assert.equal(f.state.items.length, 1);
+  assert.equal(f.state.titles.length, 1);
+  assert.equal(f.state.games[0].id, ids.game);
+  assert.equal(f.state.items[0].id, ids.item);
+  assert.equal(f.state.titles[0].id, ids.title);
+  assert.equal(f.warnings.length, 0);
 });
 
 test('mapped discovery updates source location and availability without altering metadata/runtime', async (t) => {
@@ -98,16 +161,91 @@ test('mapped discovery updates source location and availability without altering
   assert.equal(f.state.items[0].sourceAvailable, true);
 });
 
-test('missing mapped Game and ArchiveItem become unavailable, retained with cached data', async (t) => {
+test('existing unmapped Game is adopted in place: same ID, metadata preserved, one Title/ArchiveItem', async (t) => {
   const f = await fixture(t);
-  const game = f.seed('Missing');
-  const before = { ...game };
-  assert.equal((await f.scan()).unavailable, 1);
-  assert.deepEqual(game, { ...before, sourceAvailable: false });
-  assert.equal(f.state.items[0].sourceAvailable, false);
+  const game = f.seed('Unmapped');
+  game.archiveItemId = null;
+  f.state.items.length = 0;
+  f.state.titles.length = 0;
+  await mkdir(join(f.source, 'Unmapped'));
+  await f.scan();
+  assert.equal(game.id, fingerprint('Unmapped'));
+  assert.equal(game.sourceAvailable, true);
+  assert.equal(game.metadataSource, 'manual');
+  assert.equal(game.coverPath, '/cached.jpg');
+  assert.equal(game.buildStatus, 'built');
+  assert.equal(game.webBuildPath, '/web-builds/legacy');
+  assert.equal(game.publishStatus, 'published');
+  assert.equal(game.extractedTitle, 'Manual title');
+  assert.equal(f.state.items.length, 1);
   assert.equal(f.state.titles.length, 1);
-  assert.equal((await f.scan()).unavailable, 1);
+  assert.equal(game.archiveItemId, f.state.items[0].id);
+  assert.equal(f.state.items[0].titleId, f.state.titles[0].id);
+  assert.equal(f.state.titles[0].name, 'Manual title');
   assert.equal(f.warnings.length, 0);
+});
+
+test('source disappearance retains Game/ArchiveItem/Title; restoration reuses the same IDs', async (t) => {
+  const f = await fixture(t);
+  await mkdir(join(f.source, 'Roundtrip'));
+  await f.scan();
+  const ids = { game: f.state.games[0].id, item: f.state.items[0].id, title: f.state.titles[0].id };
+  await rm(join(f.source, 'Roundtrip'), { recursive: true });
+  assert.equal((await f.scan()).unavailable, 1);
+  assert.equal(f.state.games.length, 1);
+  assert.equal(f.state.items.length, 1);
+  assert.equal(f.state.titles.length, 1);
+  assert.equal(f.state.games[0].sourceAvailable, false);
+  assert.equal(f.state.items[0].sourceAvailable, false);
+  await mkdir(join(f.source, 'Roundtrip'));
+  assert.equal((await f.scan()).unavailable, 0);
+  assert.equal(f.state.games[0].id, ids.game);
+  assert.equal(f.state.items[0].id, ids.item);
+  assert.equal(f.state.titles[0].id, ids.title);
+  assert.equal(f.state.games[0].sourceAvailable, true);
+  assert.equal(f.state.items[0].sourceAvailable, true);
+});
+
+test('Title.name falls back to the directory name when options.rpy is absent', async (t) => {
+  const f = await fixture(t);
+  await mkdir(join(f.source, 'Nice_Directory'));
+  await f.scan();
+  assert.equal(f.state.titles[0].name, 'Nice Directory');
+});
+
+test('Title.name is filled once when NULL but never overwrites a non-null name', async (t) => {
+  const f = await fixture(t);
+  const game = f.seed('Named');
+  f.state.titles[0].name = null;
+  await mkdir(join(f.source, 'Named'));
+  await f.scan();
+  assert.equal(f.state.titles[0].name, 'Manual title');
+
+  // A non-null name survives extraction changes.
+  f.state.titles[0].name = 'Canonical Name';
+  await writeFile(join(f.source, 'Named', 'options.rpy'), 'define config.name = "Changed"').catch(async () => {
+    await mkdir(join(f.source, 'Named'));
+    await writeFile(join(f.source, 'Named', 'options.rpy'), 'define config.name = "Changed"');
+  });
+  await f.scan();
+  assert.equal(f.state.titles[0].name, 'Canonical Name');
+});
+
+test('occupied ArchiveItem directoryPath is a conflict: Game stays unmapped, no duplicates', async (t) => {
+  const f = await fixture(t);
+  // An existing ArchiveItem already occupies the path, with no Game linked to it.
+  f.state.items.push({
+    id: 'other-item', titleId: 'other-title', directoryPath: join(f.source, 'Occupied'),
+    directoryName: 'Occupied', sourceAvailable: true,
+  });
+  f.state.titles.push({ id: 'other-title', name: 'Other' });
+  await mkdir(join(f.source, 'Occupied'));
+  await f.scan();
+  assert.equal(f.state.items.length, 1);
+  assert.equal(f.state.titles.length, 1);
+  assert.equal(f.state.games[0].archiveItemId, null);
+  assert.equal(f.warnings.length, 1);
+  assert.match(f.warnings[0][1], /already occupied/);
 });
 
 for (const issue of ['missing item', 'missing title', 'inconsistent path']) {
@@ -145,22 +283,6 @@ test('ZIP discovery never imports/extracts or changes existing build output or s
   assert.equal(f.warnings.length, 0);
 });
 
-test('existing unmapped Game stays unmapped through disappearance and rediscovery', async (t) => {
-  const f = await fixture(t);
-  const game = f.seed('Unmapped');
-  game.archiveItemId = null;
-  f.state.items.length = 0;
-  f.state.titles.length = 0;
-  await f.scan();
-  assert.equal(game.sourceAvailable, false);
-  await mkdir(join(f.source, 'Unmapped'));
-  await f.scan();
-  assert.equal(game.sourceAvailable, true);
-  assert.equal(game.archiveItemId, null);
-  assert.equal(f.state.items.length, 0);
-  assert.equal(f.state.titles.length, 0);
-});
-
 test('unavailable inconsistent mapping is reported and not silently repaired', async (t) => {
   const f = await fixture(t);
   const game = f.seed('Missing');
@@ -170,7 +292,6 @@ test('unavailable inconsistent mapping is reported and not silently repaired', a
   assert.equal(f.state.items[0].sourceAvailable, true);
   assert.equal(f.warnings.length, 1);
 });
-
 
 test('inventory preserves orphaned generated artifacts and source-root files', async (t) => {
   const f = await fixture(t);
@@ -219,4 +340,17 @@ test('concurrent Game deletion is skipped and later unavailable mappings still s
   assert.equal(f.warnings.length, 1);
   assert.equal(f.warnings[0][0].gameId, deletedId);
   assert.match(f.warnings[0][1], /Game deleted before unavailable processing; skipping/);
+});
+
+test('scanning never mutates the read-only source tree (contents, symlinks, metadata)', async (t) => {
+  const f = await fixture(t);
+  await mkdir(join(f.source, 'Safe'), { recursive: true });
+  await mkdir(join(f.source, 'Safe', 'game'));
+  await writeFile(join(f.source, 'Safe', 'game', 'script.rpy'), 'label start:\n    return\n');
+  await mkdir(join(f.source, 'Safe', 'game', 'images'));
+  await symlink('images', join(f.source, 'Safe', 'game', 'assets'));
+  const before = await treeSnapshot(f.source);
+  await f.scan();
+  await f.scan();
+  assert.deepEqual(await treeSnapshot(f.source), before);
 });

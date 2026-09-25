@@ -2,6 +2,7 @@ import { readdir, access } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { extractTitleFromOptions, cleanDirectoryName } from './titleExtractor.js';
+import { ensureArchiveMapping, MAPPING_CONFLICT } from './archiveCatalog.js';
 
 /**
  * Generate a stable fingerprint ID from a directory name.
@@ -14,20 +15,19 @@ function generateFingerprint(dirName) {
   return createHash('sha256').update(dirName).digest('hex').slice(0, 32);
 }
 
-/** Update only a consistent existing mapping; never infer or repair identity. */
-async function syncArchiveItem(tx, game, source, log) {
-  if (!game.archiveItemId) return;
-  const item = await tx.archiveItem.findUnique({ where: { id: game.archiveItemId } });
-  const title = item && await tx.title.findUnique({ where: { id: item.titleId } });
-  const fields = ['directoryPath', 'directoryName', 'sourceAvailable'];
-  if (!item || !title || fields.some((field) => item[field] !== game[field])) {
+/** Log a mapping conflict without repairing the catalog link. */
+function warnMappingConflict(log, game, mapping) {
+  if (mapping.code === MAPPING_CONFLICT.DIRECTORY_PATH_CONFLICT) {
     log.warn?.(
-      { gameId: game.id, archiveItemId: game.archiveItemId },
-      'Missing or inconsistent archive mapping; linked ArchiveItem left unchanged',
+      { gameId: game.id, directoryPath: game.directoryPath },
+      'ArchiveItem directoryPath already occupied; Game left unmapped',
     );
     return;
   }
-  await tx.archiveItem.update({ where: { id: item.id }, data: source });
+  log.warn?.(
+    { gameId: game.id, archiveItemId: game.archiveItemId },
+    'Missing or inconsistent archive mapping; linked ArchiveItem left unchanged',
+  );
 }
 
 /**
@@ -39,7 +39,8 @@ async function syncArchiveItem(tx, game, source, log) {
  * 3. Generates a stable ID from the directory name.
  * 4. Extracts the game title from options.rpy (fallback: cleaned dir name).
  * 5. Upserts into DB: new games are created, existing games get path and availability updated.
- * 6. Games in DB not discovered in this scan are marked unavailable and retained.
+ * 6. Ensures each discovered source has a deterministic Title -> ArchiveItem -> Game mapping.
+ * 7. Games in DB not discovered in this scan are marked unavailable and retained.
  *
  * @param {string} gamesPath - The root directory to scan (e.g. "/games").
  * @param {import('@prisma/client').PrismaClient} prisma - Prisma client instance.
@@ -76,7 +77,12 @@ export async function scanGamesDirectory(gamesPath, prisma, logger) {
     await prisma.$transaction(async (tx) => {
       const existing = await tx.game.findUnique({ where: { id } });
       if (existing) {
-        await syncArchiveItem(tx, existing, source, log);
+        // Manual titles remain the display identity; otherwise use the fresh
+        // extraction. Validate the OLD source before moving the ArchiveItem.
+        const nextExtractedTitle =
+          existing.metadataSource !== 'manual' ? extractedTitle : existing.extractedTitle;
+        const mapping = await ensureArchiveMapping(tx, existing, { titleName: nextExtractedTitle, source });
+        if (mapping.status === 'conflict') warnMappingConflict(log, existing, mapping);
         await tx.game.update({
           where: { id },
           data: {
@@ -86,7 +92,10 @@ export async function scanGamesDirectory(gamesPath, prisma, logger) {
           },
         });
       } else {
-        await tx.game.create({ data: { id, ...source, extractedTitle } });
+        const created = await tx.game.create({ data: { id, ...source, extractedTitle } });
+        // Adopt the new compatibility Game into the archive catalog immediately.
+        const mapping = await ensureArchiveMapping(tx, created, { titleName: extractedTitle, source });
+        if (mapping.status === 'conflict') warnMappingConflict(log, created, mapping);
         newCount++;
       }
     });
@@ -106,7 +115,11 @@ export async function scanGamesDirectory(gamesPath, prisma, logger) {
         log.warn?.({ gameId: id }, 'Game deleted before unavailable processing; skipping');
         return false;
       }
-      await syncArchiveItem(tx, game, { sourceAvailable: false }, log);
+      const mapping = await ensureArchiveMapping(tx, game, {
+        titleName: game.extractedTitle || game.directoryName,
+        source: { sourceAvailable: false },
+      });
+      if (mapping.status === 'conflict') warnMappingConflict(log, game, mapping);
       await tx.game.update({ where: { id }, data: { sourceAvailable: false } });
       return true;
     });

@@ -5,6 +5,7 @@ import { backfillArchiveCatalog } from './backfill-archive-catalog.js';
 const game = () => ({
   id: 'a'.repeat(32), archiveItemId: null,
   directoryPath: '/read-only/Exact Folder', directoryName: 'Exact Folder', sourceAvailable: false,
+  extractedTitle: 'Extracted Title',
   createdAt: new Date('2020-01-01'), updatedAt: new Date('2021-01-01'),
   vndbId: 'v17', tags: '[]', screenshots: '["cached"]', coverPath: '/covers/legacy.jpg',
   buildStatus: 'built', publishStatus: 'published', favorite: true,
@@ -16,7 +17,7 @@ function fixture({ mapped = false, failUpdate = false } = {}) {
   let state = { games: [game()], titles: [], items: [] };
   if (mapped) {
     state.games[0].archiveItemId = 'item';
-    state.titles.push({ id: 'title' });
+    state.titles.push({ id: 'title', name: 'Existing Title' });
     state.items.push({ ...game(), id: 'item', titleId: 'title' });
   }
   const writes = [];
@@ -42,6 +43,13 @@ function fixture({ mapped = false, failUpdate = false } = {}) {
             writes.push(['title.create', data]);
             const row = { ...data, id: `title-${draft.titles.length}` };
             draft.titles.push(row);
+            return row;
+          },
+          update: async ({ where, data }) => {
+            writes.push(['title.update', data]);
+            const row = draft.titles.find((t) => t.id === where.id);
+            assert.ok(row);
+            Object.assign(row, data);
             return row;
           },
         },
@@ -82,7 +90,10 @@ test('maps exact source fields and preserves all existing Game values and timest
   const before = structuredClone(f.state.games[0]);
   assert.equal((await run(f, true)).summary.mapped, 1);
   assert.deepEqual(f.state.games[0], { ...before, archiveItemId: 'item-0' });
-  assert.deepEqual(f.state.titles, [{ id: 'title-0', createdAt: before.createdAt, updatedAt: before.updatedAt }]);
+  assert.deepEqual(f.state.titles, [{
+    id: 'title-0', name: 'Extracted Title',
+    createdAt: before.createdAt, updatedAt: before.updatedAt,
+  }]);
   assert.deepEqual(f.state.items, [{
     id: 'item-0', titleId: 'title-0', directoryPath: before.directoryPath,
     directoryName: before.directoryName, sourceAvailable: false,
@@ -134,4 +145,22 @@ test('failed Game update rolls back new Title and ArchiveItem', async () => {
   const before = structuredClone(f.state);
   assert.equal((await run(f, true)).summary.errors, 1);
   assert.deepEqual(f.state, before);
+});
+
+test('fills a NULL Title.name once and never rewrites a non-null name', async () => {
+  const f = fixture({ mapped: true });
+  f.state.titles[0].name = null;
+  assert.equal((await run(f, true)).summary.skipped, 1);
+  assert.equal(f.state.titles[0].name, 'Extracted Title');
+
+  const after = structuredClone(f.state);
+  assert.equal((await run(f, true)).summary.skipped, 1);
+  assert.deepEqual(f.state, after, 'second run must not rewrite the name');
+});
+
+test('Title.name falls back to directoryName when no extracted title exists', async () => {
+  const f = fixture();
+  delete f.state.games[0].extractedTitle;
+  assert.equal((await run(f, true)).summary.mapped, 1);
+  assert.equal(f.state.titles[0].name, 'Exact Folder');
 });

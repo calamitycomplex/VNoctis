@@ -74,6 +74,8 @@ const EXPECTED_SHAPE = Object.fromEntries(
   GAME_PUBLISH_COLUMNS.map((c) => [c.name, { type: c.type, notnull: c.notnull, dflt: c.default }])
 );
 
+const TITLE_NAME_MIGRATION = '20260925010000_add_title_name';
+
 const gameId = () => 'a'.repeat(32);
 const gameData = (id) => ({
   id,
@@ -282,6 +284,58 @@ test('a non-recoverable migration failure still throws from deployMigrations', a
       }),
       /database is locked/
     );
+  } finally {
+    await prisma.$disconnect();
+  }
+});
+
+
+test('fresh database creates nullable Title.name and preserves existing Title rows through the additive migration', async (t) => {
+  const db = makeDb(t);
+  deploy(db);
+  const prisma = client(db);
+  try {
+    const fresh = await prisma.$queryRawUnsafe(`PRAGMA table_info("Title")`);
+    const nameColumn = fresh.find((column) => column.name === 'name');
+    assert.ok(nameColumn, 'fresh schema must have Title.name');
+    assert.equal(nameColumn.type, 'TEXT');
+    assert.equal(Number(nameColumn.notnull), 0, 'Title.name must stay nullable');
+
+    const title = await prisma.title.create({ data: { name: 'Existing Title' } });
+    assert.equal(title.name, 'Existing Title');
+
+    // Simulate the pre-migration database: drop the column and forget the migration.
+    await prisma.$executeRawUnsafe(`ALTER TABLE "Title" DROP COLUMN "name"`);
+    await prisma.$executeRawUnsafe(
+      `DELETE FROM "_prisma_migrations" WHERE migration_name = '${TITLE_NAME_MIGRATION}'`
+    );
+
+    deploy(db);
+
+    const restored = (await prisma.$queryRawUnsafe(`PRAGMA table_info("Title")`)).find((column) => column.name === 'name');
+    assert.ok(restored, 'migration must re-add Title.name');
+    assert.equal(Number(restored.notnull), 0, 're-added Title.name must stay nullable');
+
+    const survived = await prisma.title.findUnique({ where: { id: title.id } });
+    assert.ok(survived, 'existing Title row must survive the additive migration');
+    assert.equal(survived.name, null);
+
+    await prisma.title.update({ where: { id: title.id }, data: { name: 'Renamed' } });
+    assert.equal((await prisma.title.findUnique({ where: { id: title.id } })).name, 'Renamed');
+
+    const unfinished = await prisma.$queryRawUnsafe(
+      `SELECT COUNT(*) AS n FROM "_prisma_migrations"
+        WHERE finished_at IS NULL AND rolled_back_at IS NULL`
+    );
+    assert.equal(Number(unfinished[0].n), 0, 'no failed migration record may remain');
+    const applied = await prisma.$queryRawUnsafe(
+      `SELECT finished_at FROM "_prisma_migrations" WHERE migration_name = '${TITLE_NAME_MIGRATION}'`
+    );
+    assert.ok(applied.some((row) => row.finished_at != null), 'Title.name migration must end applied');
+
+    // Idempotent rerun.
+    deploy(db);
+    assert.equal((await prisma.title.findUnique({ where: { id: title.id } })).name, 'Renamed');
   } finally {
     await prisma.$disconnect();
   }

@@ -1,4 +1,5 @@
 import { pathToFileURL } from 'node:url';
+import { ensureArchiveMapping } from '../../src/services/archiveCatalog.js';
 
 /**
  * Operator-only maintenance; never import application startup.
@@ -7,16 +8,15 @@ import { pathToFileURL } from 'node:url';
  * Replace --dry-run with --apply to write. No flag defaults to dry-run.
  * Reads/writes database records only; does not inspect source paths or files.
  * Conflicts are reported, never repaired automatically. Exit 1 means review is required.
+ *
+ * Mapping rules are shared with the runtime scanner (src/services/archiveCatalog.js),
+ * so backfill and discovery produce the same deterministic Title -> ArchiveItem -> Game
+ * shape. Orchestration (dry-run, resumability, reporting) stays here.
  */
-const sourceFields = ['directoryPath', 'directoryName', 'sourceAvailable'];
 const gameSelect = {
   id: true, archiveItemId: true, directoryPath: true, directoryName: true,
-  sourceAvailable: true, createdAt: true, updatedAt: true,
+  sourceAvailable: true, extractedTitle: true, createdAt: true, updatedAt: true,
 };
-
-function conflict(code, message) {
-  throw Object.assign(new Error(message), { code });
-}
 
 export async function backfillArchiveCatalog(prisma, { apply = false, report = () => {} } = {}) {
   const summary = { mapped: 0, wouldMap: 0, skipped: 0, errors: 0 };
@@ -26,44 +26,29 @@ export async function backfillArchiveCatalog(prisma, { apply = false, report = (
     try {
       result = await prisma.$transaction(async (tx) => {
         const game = await tx.game.findUnique({ where: { id }, select: gameSelect });
-        if (!game) conflict('GAME_MISSING', 'Game disappeared during backfill; stop concurrent writers.');
-        if (game.archiveItemId !== null) {
-          const item = await tx.archiveItem.findUnique({ where: { id: game.archiveItemId } });
-          if (!item) conflict('ARCHIVE_ITEM_MISSING', `Missing ArchiveItem ${game.archiveItemId}.`);
-          const title = await tx.title.findUnique({ where: { id: item.titleId } });
-          if (!title) conflict('TITLE_MISSING', `Missing Title ${item.titleId}.`);
-          const mismatches = sourceFields.filter((field) => item[field] !== game[field]);
-          if (mismatches.length) conflict('INCONSISTENT_MAPPING', `Source fields differ: ${mismatches.join(', ')}.`);
-          return { status: 'skipped', archiveItemId: item.id, titleId: title.id };
+        if (!game) {
+          return { code: 'GAME_MISSING', message: 'Game disappeared during backfill; stop concurrent writers.' };
         }
-        const existing = await tx.archiveItem.findUnique({ where: { directoryPath: game.directoryPath } });
-        if (existing) {
-          conflict('DIRECTORY_PATH_CONFLICT', `ArchiveItem ${existing.id} already occupies this path; possible partial mapping. Manual review required.`);
-        }
-        if (!apply) return { status: 'wouldMap' };
-        const timestamps = { createdAt: game.createdAt, updatedAt: game.updatedAt };
-        const title = await tx.title.create({ data: timestamps });
-        const item = await tx.archiveItem.create({
-          data: {
-            titleId: title.id,
-            directoryPath: game.directoryPath,
-            directoryName: game.directoryName,
-            sourceAvailable: game.sourceAvailable,
-            ...timestamps,
-          },
+        const mapping = await ensureArchiveMapping(tx, game, {
+          apply,
+          titleName: game.extractedTitle || game.directoryName,
+          timestamps: { createdAt: game.createdAt, updatedAt: game.updatedAt },
         });
-        await tx.game.update({
-          where: { id },
-          data: { archiveItemId: item.id, updatedAt: game.updatedAt },
-          select: { id: true },
-        });
-        return { status: 'mapped', archiveItemId: item.id, titleId: title.id };
+        if (mapping.status === 'conflict') return { code: mapping.code, message: mapping.message };
+        if (mapping.status === 'would-create') return { status: 'wouldMap' };
+        return {
+          status: mapping.status === 'created' ? 'mapped' : 'skipped',
+          archiveItemId: mapping.item?.id,
+          titleId: mapping.title?.id,
+        };
       });
-      summary[result.status]++;
     } catch (error) {
       summary.errors++;
-      result = { status: 'error', code: error.code || 'BACKFILL_FAILED', message: error.message };
+      report({ gameId: id, status: 'error', code: error.code || 'BACKFILL_FAILED', message: error.message });
+      continue;
     }
+    if (result.code) summary.errors++;
+    else summary[result.status]++;
     report({ gameId: id, ...result });
   }
   return summary;
