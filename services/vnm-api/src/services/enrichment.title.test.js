@@ -171,26 +171,33 @@ test('G. unmatched lookup marks Title (and Games) unmatched without crashing', a
   assert.equal(committed(d).metadataSource, 'unmatched');
 });
 
-test('H. media downloads once through the storage adapter and mirrors logical paths', async () => {
+test('H. media downloads once under Title identity for a multi-Game Title', async () => {
+  const titleId = '11111111-2222-3333-4444-555555555555';
   const covers = await mkdtemp(join(tmpdir(), 'vnm-covers-'));
   const shots = await mkdtemp(join(tmpdir(), 'vnm-shots-'));
   const origFetch = globalThis.fetch;
-  globalThis.fetch = async () => ({ ok: true, statusText: 'OK', arrayBuffer: async () => Buffer.from('img') });
+  let fetchCount = 0;
+  globalThis.fetch = async () => { fetchCount++; return { ok: true, statusText: 'OK', arrayBuffer: async () => Buffer.from('img') }; };
   try {
     const a = game('a'.repeat(32));
     const b = game('b'.repeat(32), { sourceAvailable: false });
-    const d = db([title('t1', { archiveItems: [{ id: 'i1', game: a }, { id: 'i2', game: b }] })]);
+    const d = db([title(titleId, { archiveItems: [{ id: 'i1', game: a }, { id: 'i2', game: b }] })]);
 
     await enrichTitle(d.state.titles[0], [a, b], d, fakeVndb(), covers, shots, silent);
 
-    const storage = pickMediaStorageGame([a, b]);
-    assert.equal(storage.id, a.id);
-    assert.equal(d.state.titles[0].coverPath, `/covers/${a.id}.jpg`);
-    assert.deepEqual(JSON.parse(d.state.titles[0].screenshots), [`/screenshots/${a.id}/0.jpg`]);
-    assert.equal(committed(d, 0, 0).coverPath, `/covers/${a.id}.jpg`);
-    assert.equal(committed(d, 0, 1).coverPath, `/covers/${a.id}.jpg`);
-    assert.deepEqual(await readdir(covers), [`${a.id}.jpg`]);
-    assert.deepEqual(await readdir(join(shots, a.id)), ['0.jpg']);
+    // Storage adapter is still used for steamAppId targeting, but no longer for media.
+    assert.equal(pickMediaStorageGame([a, b]).id, a.id);
+    // One cover + one screenshot download, stored under the Title UUID.
+    assert.equal(fetchCount, 2);
+    assert.equal(d.state.titles[0].coverPath, `/covers/titles/${titleId}.jpg`);
+    assert.deepEqual(JSON.parse(d.state.titles[0].screenshots), [`/screenshots/titles/${titleId}/0.jpg`]);
+    assert.equal(committed(d, 0, 0).coverPath, `/covers/titles/${titleId}.jpg`);
+    assert.equal(committed(d, 0, 1).coverPath, `/covers/titles/${titleId}.jpg`);
+    assert.deepEqual(await readdir(join(covers, 'titles')), [`${titleId}.jpg`]);
+    assert.deepEqual(await readdir(join(shots, 'titles', titleId)), ['0.jpg']);
+    // No Game-keyed duplicate media.
+    assert.deepEqual(await readdir(covers), ['titles']);
+    assert.deepEqual(await readdir(shots), ['titles']);
   } finally {
     globalThis.fetch = origFetch;
     await rm(covers, { recursive: true, force: true });

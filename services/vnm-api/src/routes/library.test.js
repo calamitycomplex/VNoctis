@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import Fastify from 'fastify';
-import { mkdtemp, mkdir, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile, readFile, access } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import libraryRoutes from './library.js';
@@ -82,8 +82,17 @@ test('DELETE removes the compatibility Game but retains its ArchiveItem and Titl
   const webBuilds = join(root, 'web-builds');
   const covers = join(root, 'covers');
   const screenshots = join(root, 'screenshots');
-  for (const path of [webBuilds, covers, screenshots]) await mkdir(path);
+  const titleId = '11111111-2222-3333-4444-555555555555';
+  for (const path of [webBuilds, covers, screenshots, join(covers, 'titles'), join(screenshots, 'titles', titleId)]) {
+    await mkdir(path, { recursive: true });
+  }
   process.env.WEB_BUILDS_PATH = webBuilds;
+
+  // Shared Title-owned media that a single Game deletion must not remove.
+  const titleCover = join(covers, 'titles', `${titleId}.jpg`);
+  const titleShot = join(screenshots, 'titles', titleId, '0.jpg');
+  await writeFile(titleCover, 'title cover');
+  await writeFile(titleShot, 'title shot');
 
   const gameId = 'a'.repeat(32);
   const state = {
@@ -123,4 +132,8 @@ test('DELETE removes the compatibility Game but retains its ArchiveItem and Titl
   assert.equal(state.items.length, 1, 'ArchiveItem must survive Game deletion');
   assert.equal(state.titles.length, 1, 'Title must survive Game deletion');
   assert.equal(state.items[0].titleId, state.titles[0].id, 'Title/ArchiveItem relationship must stay intact');
+  // Regression: Game deletion must not remove shared Title-owned media.
+  assert.equal(await readFile(titleCover, 'utf8'), 'title cover', 'Title cover must survive Game deletion');
+  assert.equal(await readFile(titleShot, 'utf8'), 'title shot', 'Title screenshots must survive Game deletion');
+  await access(join(covers, 'titles'));
 });

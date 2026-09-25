@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { generateGradient, formatRating, getRatingColor, truncate } from '../lib/utils';
-import { archiveItemsOf, displayTitleFor, logicalMetadataFor, pickCoverGame, singleGameFor } from '../lib/titleDisplay';
+import { archiveItemsOf, coverUrlFor, displayTitleFor, logicalMetadataFor, singleGameFor } from '../lib/titleDisplay';
 
 /**
  * Card for one logical Title.
@@ -14,14 +14,15 @@ export default function TitleCard({ title, onClick, onHide, onFavorite, isAdmin 
 
   const items = archiveItemsOf(title);
   const game = singleGameFor(title);
-  const coverGame = pickCoverGame(title);
   const name = displayTitleFor(title);
   // Title.metadata is authoritative; nested Game is a compatibility fallback.
   const meta = logicalMetadataFor(title);
   const gradient = generateGradient(name);
 
-  const coverUrl = coverGame?.coverPath
-    ? `/api/v1/covers/${coverGame.id}?t=${encodeURIComponent(coverGame.updatedAt || '')}`
+  // Title-owned cover URL when resolvable; falls back to a single legacy Game.
+  const baseCoverUrl = coverUrlFor(title);
+  const coverUrl = baseCoverUrl
+    ? `${baseCoverUrl}?t=${encodeURIComponent(title.updatedAt || '')}`
     : null;
 
   const isMulti = items.length > 1;

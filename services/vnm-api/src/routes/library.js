@@ -4,10 +4,9 @@ import { scanGamesDirectory } from '../services/scanner.js';
 import {
   runBatchTitleEnrichment,
   applyTitleLogicalWrite,
-  pickMediaStorageGame,
   TITLE_LOGICAL_FIELDS,
 } from '../services/enrichment.js';
-import { downloadCover } from '../services/coverDownloader.js';
+import { downloadCover, downloadEntityCover, removeEntityCover } from '../services/coverDownloader.js';
 import { removeScreenshots } from '../services/screenshotDownloader.js';
 import {
   TITLE_SELECT,
@@ -312,25 +311,18 @@ export default async function libraryRoutes(fastify) {
       select: { id: true, sourceAvailable: true },
     });
 
-    // Optional remote cover: download once through the temporary media-storage
-    // adapter Game, then mirror the resulting logical path.
+    // Optional remote cover: download once under the Title's own media path so
+    // multi-release Titles never duplicate media through a storage Game.
     if (updateData.coverPath && /^https?:\/\//.test(updateData.coverPath)) {
-      const storageGame = pickMediaStorageGame(games);
-      if (storageGame) {
-        const coversPath = fastify.coversPath || '/covers';
-        try {
-          const existing = await readdir(coversPath);
-          for (const file of existing) {
-            if (file.startsWith(storageGame.id)) await rm(join(coversPath, file), { force: true });
-          }
-        } catch { /* covers dir may not exist yet */ }
-
-        const localPath = await downloadCover(updateData.coverPath, storageGame.id, coversPath);
-        if (localPath) updateData.coverPath = localPath;
-        else return reply.code(400).send({
-          error: { code: 'COVER_DOWNLOAD_FAILED', message: 'Failed to download the cover image from the provided URL.' },
-        });
-      }
+      const coversPath = fastify.coversPath || '/covers';
+      await removeEntityCover({ entityType: 'title', entityId: titleId, rootPath: coversPath });
+      const localPath = await downloadEntityCover({
+        entityType: 'title', entityId: titleId, imageUrl: updateData.coverPath, rootPath: coversPath,
+      });
+      if (localPath) updateData.coverPath = localPath;
+      else return reply.code(400).send({
+        error: { code: 'COVER_DOWNLOAD_FAILED', message: 'Failed to download the cover image from the provided URL.' },
+      });
     }
 
     updateData.metadataSource = 'manual';
@@ -699,6 +691,9 @@ export default async function libraryRoutes(fastify) {
     try {
       const coverFiles = await readdir(coversPath);
       for (const file of coverFiles) {
+        // `titles/` holds shared Title-owned media and must never be removed
+        // as part of deleting one compatibility Game.
+        if (file === 'titles') continue;
         if (file.startsWith(gameId)) {
           await rm(join(coversPath, file), { force: true });
         }

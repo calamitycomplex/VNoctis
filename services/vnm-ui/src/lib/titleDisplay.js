@@ -62,6 +62,36 @@ export function logicalMetadataFor(title) {
 }
 
 /**
+ * Cover URL for DISPLAY ONLY.
+ *
+ * Prefers the Title-owned `metadata.coverUrl` (which is safe for both
+ * Title-owned media and a single unambiguous legacy fallback). Falls back to a
+ * single Game's legacy cover URL for older payloads. Returns null for ambiguous
+ * multi-release Titles so the existing gradient fallback is used — never picks a
+ * primary Game.
+ */
+export function coverUrlFor(title) {
+  if (!title) return null;
+  if (title.metadata?.coverUrl) return title.metadata.coverUrl;
+  const game = singleGameFor(title);
+  if (game?.coverPath) return `/api/v1/covers/${game.id}`;
+  return null;
+}
+
+/**
+ * Screenshot URLs for display. Prefers Title-owned metadata screenshot URLs and
+ * falls back to a single Game's screenshots. Multi-release Titles with no Title
+ * screenshots must not borrow an arbitrary release's set.
+ */
+export function screenshotUrlsFor(title) {
+  if (!title) return [];
+  const urls = title.metadata?.screenshotUrls;
+  if (urls?.length) return urls;
+  const game = singleGameFor(title);
+  return game?.screenshots ?? [];
+}
+
+/**
  * Cover Game for DISPLAY ONLY.
  * Returns a Game only when exactly one ArchiveItem has a usable cover; otherwise
  * null so the existing gradient fallback is used. Never implies a primary source.

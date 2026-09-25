@@ -5,11 +5,9 @@
  * cover downloading to populate game metadata automatically.
  */
 
-import { rm } from 'node:fs/promises';
-import { join } from 'node:path';
 import { matchTitle } from './matcher.js';
-import { downloadCover } from './coverDownloader.js';
-import { downloadScreenshots, removeScreenshots } from './screenshotDownloader.js';
+import { downloadCover, downloadEntityCover, removeEntityCover } from './coverDownloader.js';
+import { downloadScreenshots, removeScreenshots, downloadEntityScreenshots, removeEntityScreenshots } from './screenshotDownloader.js';
 import { cleanSynopsis } from './synopsisCleaner.js';
 import { SteamClient } from './steamClient.js';
 
@@ -412,23 +410,32 @@ export async function applyTitleLogicalWrite(db, titleId, titleData, games = [],
   return updatedTitle;
 }
 
-/** Shared media download step used by VNDB/Steam Title enrichment. */
-async function downloadTitleMedia({ storageGame, coversPath, screenshotsPath, coverUrl, screenshotUrls = [] }) {
+/**
+ * Shared media download step used by VNDB/Steam Title enrichment.
+ *
+ * New media is stored under Title identity (`/covers/titles/<titleId>.jpg`,
+ * `/screenshots/titles/<titleId>/…`) so a Title with several ArchiveItems only
+ * downloads one media set. Existing Game-keyed media is left untouched.
+ */
+async function downloadTitleMedia({ titleId, coversPath, screenshotsPath, coverUrl, screenshotUrls = [] }) {
   const data = {};
-  if (!storageGame) return data;
 
   if (coversPath) {
-    try { await rm(join(coversPath, `${storageGame.id}.jpg`), { force: true }); } catch { /* ignore */ }
+    await removeEntityCover({ entityType: 'title', entityId: titleId, rootPath: coversPath });
     if (coverUrl) {
-      const localCover = await downloadCover(coverUrl, storageGame.id, coversPath);
+      const localCover = await downloadEntityCover({
+        entityType: 'title', entityId: titleId, imageUrl: coverUrl, rootPath: coversPath,
+      });
       if (localCover) data.coverPath = localCover;
     }
   }
 
   if (screenshotsPath) {
-    await removeScreenshots(storageGame.id, screenshotsPath);
+    await removeEntityScreenshots({ entityType: 'title', entityId: titleId, rootPath: screenshotsPath });
     if (screenshotUrls.length > 0) {
-      const localPaths = await downloadScreenshots(screenshotUrls, storageGame.id, screenshotsPath);
+      const localPaths = await downloadEntityScreenshots({
+        entityType: 'title', entityId: titleId, urls: screenshotUrls, rootPath: screenshotsPath,
+      });
       data.screenshots = JSON.stringify(localPaths);
     }
   }
@@ -439,7 +446,7 @@ async function downloadTitleMedia({ storageGame, coversPath, screenshotsPath, co
 async function applyTitleMatch(vn, title, games, prisma, coversPath, screenshotsPath) {
   const data = mapVnToTitleData(vn);
   const media = await downloadTitleMedia({
-    storageGame: pickMediaStorageGame(games),
+    titleId: title.id,
     coversPath,
     screenshotsPath,
     coverUrl: vn.image?.url || null,
@@ -523,19 +530,25 @@ export async function enrichTitleBySteamId(
     if (!details) return markTitleUnmatched(title, games, prisma);
 
     const data = mapSteamToTitleData(details);
+    // steamAppId is Game/release-owned; a Game is still needed as its target,
+    // but media storage no longer depends on picking one.
     const storageGame = pickMediaStorageGame(games);
     const media = await downloadTitleMedia({
-      storageGame,
+      titleId: title.id,
       coversPath,
       screenshotsPath,
       coverUrl: SteamClient.getLibraryCapsuleUrl(steamAppId),
       screenshotUrls: details.screenshots?.slice(0, 8)?.map((s) => s.path_full) || [],
     });
-    if (!media.coverPath && storageGame && coversPath) {
+    if (!media.coverPath && coversPath) {
       const heroCapsuleUrl = SteamClient.getHeroCapsuleUrl(steamAppId);
-      const localCover = await downloadCover(heroCapsuleUrl, storageGame.id, coversPath);
+      const localCover = await downloadEntityCover({
+        entityType: 'title', entityId: title.id, imageUrl: heroCapsuleUrl, rootPath: coversPath,
+      });
       if (!localCover && details.header_image) {
-        const headerCover = await downloadCover(details.header_image, storageGame.id, coversPath);
+        const headerCover = await downloadEntityCover({
+          entityType: 'title', entityId: title.id, imageUrl: details.header_image, rootPath: coversPath,
+        });
         if (headerCover) media.coverPath = headerCover;
       } else if (localCover) {
         media.coverPath = localCover;

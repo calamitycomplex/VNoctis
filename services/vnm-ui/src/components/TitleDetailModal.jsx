@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import api from '../hooks/useApi';
 import { generateGradient, getBuildStatusBadge } from '../lib/utils';
-import { archiveItemsOf, displayTitleFor, isMultiRelease, logicalMetadataFor } from '../lib/titleDisplay';
+import { archiveItemsOf, coverUrlFor, displayTitleFor, isMultiRelease, logicalMetadataFor } from '../lib/titleDisplay';
 
 /**
  * Title detail modal for Titles that should not open a single Game detail
@@ -59,6 +59,8 @@ export default function TitleDetailModal({ title: initialTitle, onClose, onOpenG
   // Title.metadata is authoritative; nested Game is a compatibility fallback.
   const meta = logicalMetadataFor(title);
   const gradient = generateGradient(name);
+  // Title-owned cover URL when resolvable; never picks a primary Game.
+  const coverUrl = coverUrlFor(title);
 
   return (
     <div
@@ -98,7 +100,14 @@ export default function TitleDetailModal({ title: initialTitle, onClose, onOpenG
         {title && !loading && !error && (
           <>
             <div className="relative w-full h-40 sm:h-48 overflow-hidden rounded-t-xl">
-              <div className="w-full h-full" style={{ background: gradient }} />
+              <div className="absolute inset-0" style={{ background: gradient }} />
+              {coverUrl && (
+                <img
+                  src={coverUrl}
+                  alt=""
+                  className="absolute inset-0 w-full h-full object-cover"
+                />
+              )}
               <div className="absolute inset-0 bg-gradient-to-t from-white dark:from-gray-900 via-white/40 dark:via-gray-900/40 to-transparent" />
             </div>
 

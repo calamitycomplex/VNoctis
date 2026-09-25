@@ -2,11 +2,13 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   archiveItemsOf,
+  coverUrlFor,
   displayTitleFor,
   hasRuntimeActions,
   isMultiRelease,
   logicalMetadataFor,
   pickCoverGame,
+  screenshotUrlsFor,
   singleGameFor,
 } from './titleDisplay.js';
 
@@ -93,4 +95,27 @@ test('isMultiRelease/hasRuntimeActions describe safe action availability', () =>
 test('archiveItemsOf is null-safe', () => {
   assert.deepEqual(archiveItemsOf(null), []);
   assert.deepEqual(displayTitleFor(null), 'Unknown');
+});
+
+test('coverUrlFor prefers Title metadata and never picks a primary Game for multi-release', () => {
+  const meta = { coverUrl: '/api/v1/covers/titles/t1' };
+  assert.equal(coverUrlFor(title({ metadata: meta, archiveItems: [item({ game: { id: 'g1', coverPath: '/covers/g.jpg' } })] })), '/api/v1/covers/titles/t1');
+
+  // Falls back to a single legacy Game URL for older payloads.
+  assert.equal(coverUrlFor(title({ archiveItems: [item({ game: { id: 'g1', coverPath: '/covers/g.jpg' } })] })), '/api/v1/covers/g1');
+  assert.equal(coverUrlFor(title({ archiveItems: [item({ game: { id: 'g1' } })] })), null);
+
+  // Two distinct legacy covers: no implicit primary.
+  const multi = title({ archiveItems: [item({ game: { id: 'g1', coverPath: '/covers/a.jpg' } }), item({ id: 'item-2', game: { id: 'g2', coverPath: '/covers/b.jpg' } })] });
+  assert.equal(coverUrlFor(multi), null);
+  assert.equal(coverUrlFor(null), null);
+});
+
+test('screenshotUrlsFor prefers Title screenshot URLs and falls back to one Game set', () => {
+  const meta = { screenshotUrls: ['/screenshots/titles/t1/0.jpg'] };
+  assert.deepEqual(screenshotUrlsFor(title({ metadata: meta, archiveItems: [item({ game: { id: 'g1', screenshots: ['/screenshots/g1/0.jpg'] } })] })), ['/screenshots/titles/t1/0.jpg']);
+  assert.deepEqual(screenshotUrlsFor(title({ archiveItems: [item({ game: { id: 'g1', screenshots: ['/screenshots/g1/0.jpg'] } })] })), ['/screenshots/g1/0.jpg']);
+  const multi = title({ archiveItems: [item({ game: { id: 'g1', screenshots: ['a.jpg'] } }), item({ id: 'item-2', game: { id: 'g2', screenshots: ['b.jpg'] } })] });
+  assert.deepEqual(screenshotUrlsFor(multi), []);
+  assert.deepEqual(screenshotUrlsFor(null), []);
 });

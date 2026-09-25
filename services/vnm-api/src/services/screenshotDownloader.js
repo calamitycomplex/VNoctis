@@ -1,47 +1,48 @@
 /**
  * Screenshot downloader.
  *
- * Fetches VNDB screenshot image URLs and saves them locally,
- * mirroring the coverDownloader pattern.
- * Uses Node.js 20 built-in `fetch` — no external dependencies.
+ * Fetches VNDB/Steam screenshot URLs and saves them locally under an
+ * application-owned media root. Supports two storage identities:
  *
- * Storage layout: /screenshots/{gameId}/0.jpg, 1.jpg, …
+ *   game  -> <root>/<gameId>/0.jpg          (legacy, unchanged)
+ *   title -> <root>/titles/<titleId>/0.jpg  (Title-owned, Slice F)
+ *
+ * Uses Node.js built-in `fetch` — no external dependencies.
  */
 
 import { mkdir, writeFile, access, rm } from 'node:fs/promises';
-import { join } from 'node:path';
+import { screenshotDirPath, screenshotMediaPaths, isContained, isValidEntityId } from './mediaPaths.js';
 
 /**
- * Download an array of screenshot images to the local screenshots directory.
+ * Download an array of screenshots for an entity.
  *
- * Existing files are skipped (idempotent). On individual download failure,
- * the original remote URL is preserved as a fallback so the UI can still
- * render something.
+ * Existing files are skipped (idempotent). On individual download failure the
+ * original remote URL is preserved so the UI can still render something.
  *
- * @param {string[]}  urls             - Direct image URLs from VNDB.
- * @param {string}    gameId           - Game fingerprint ID (used as subdirectory name).
- * @param {string}    screenshotsPath  - Absolute path to the screenshots root directory (e.g. "/screenshots").
- * @returns {Promise<string[]>} Array of local paths ("/screenshots/{gameId}/0.jpg") or original URLs on failure.
+ * @param {object} options
+ * @param {'game'|'title'} options.entityType
+ * @param {string} options.entityId
+ * @param {string[]} options.urls    - Direct image URLs.
+ * @param {string} options.rootPath  - Absolute screenshots root (e.g. "/screenshots").
+ * @returns {Promise<string[]>} Local public paths, or original URLs on failure.
  */
-export async function downloadScreenshots(urls, gameId, screenshotsPath) {
-  if (!urls?.length || !gameId || !screenshotsPath) return [];
+export async function downloadEntityScreenshots({ entityType, entityId, urls, rootPath }) {
+  if (!urls?.length || !rootPath || !isValidEntityId(entityType, entityId)) return [];
 
-  const gameDir = join(screenshotsPath, gameId);
+  const dir = screenshotDirPath(rootPath, entityType, entityId);
+  if (!isContained(rootPath, dir)) return [];
 
-  // Ensure the per-game screenshot directory exists
-  await mkdir(gameDir, { recursive: true });
+  await mkdir(dir, { recursive: true });
 
   const localPaths = [];
 
   for (let i = 0; i < urls.length; i++) {
-    const filename = `${i}.jpg`;
-    const outputPath = join(gameDir, filename);
-    const localPath = `/screenshots/${gameId}/${filename}`;
+    const { filePath, urlPath } = screenshotMediaPaths(rootPath, entityType, entityId, i);
 
     // If the file already exists, skip download
     try {
-      await access(outputPath);
-      localPaths.push(localPath);
+      await access(filePath);
+      localPaths.push(urlPath);
       continue;
     } catch {
       // File does not exist — proceed with download
@@ -54,22 +55,20 @@ export async function downloadScreenshots(urls, gameId, screenshotsPath) {
 
       if (!res.ok) {
         console.error(
-          `[ScreenshotDownloader] Failed to fetch screenshot ${i} for ${gameId}: ${res.status} ${res.statusText}`
+          `[ScreenshotDownloader] Failed to fetch screenshot ${i} for ${entityType}:${entityId}: ${res.status} ${res.statusText}`
         );
-        // Fall back to remote URL so UI can still display something
         localPaths.push(urls[i]);
         continue;
       }
 
       const buffer = Buffer.from(await res.arrayBuffer());
-      await writeFile(outputPath, buffer);
-      localPaths.push(localPath);
+      await writeFile(filePath, buffer);
+      localPaths.push(urlPath);
     } catch (err) {
       console.error(
-        `[ScreenshotDownloader] Error downloading screenshot ${i} for ${gameId}:`,
+        `[ScreenshotDownloader] Error downloading screenshot ${i} for ${entityType}:${entityId}:`,
         err.message
       );
-      // Fall back to remote URL
       localPaths.push(urls[i]);
     }
   }
@@ -77,19 +76,32 @@ export async function downloadScreenshots(urls, gameId, screenshotsPath) {
   return localPaths;
 }
 
-/**
- * Remove all cached screenshots for a game.
- *
- * @param {string} gameId           - Game fingerprint ID.
- * @param {string} screenshotsPath  - Absolute path to the screenshots root directory.
- */
-export async function removeScreenshots(gameId, screenshotsPath) {
-  if (!gameId || !screenshotsPath) return;
+/** Remove an entity's cached screenshot directory (only that entity's media). */
+export async function removeEntityScreenshots({ entityType, entityId, rootPath }) {
+  if (!rootPath || !isValidEntityId(entityType, entityId)) return;
 
-  const gameDir = join(screenshotsPath, gameId);
+  const dir = screenshotDirPath(rootPath, entityType, entityId);
+  if (!isContained(rootPath, dir)) return;
+
   try {
-    await rm(gameDir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true });
   } catch {
     // Best-effort cleanup
   }
+}
+
+/**
+ * Legacy wrapper: download screenshots keyed by a Game id.
+ *
+ * @param {string[]} urls
+ * @param {string}   gameId
+ * @param {string}   screenshotsPath
+ */
+export async function downloadScreenshots(urls, gameId, screenshotsPath) {
+  return downloadEntityScreenshots({ entityType: 'game', entityId: gameId, urls, rootPath: screenshotsPath });
+}
+
+/** Legacy wrapper: remove cached screenshots for a Game. */
+export async function removeScreenshots(gameId, screenshotsPath) {
+  return removeEntityScreenshots({ entityType: 'game', entityId: gameId, rootPath: screenshotsPath });
 }

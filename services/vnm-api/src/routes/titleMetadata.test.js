@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import Fastify from 'fastify';
+import { mkdtemp, access, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import metadataRoutes from './metadata.js';
 import libraryRoutes from './library.js';
 
@@ -35,7 +38,7 @@ const VN = {
 const vndb = { matchThreshold: 0.7, async searchByTitle() { return [VN]; }, async getById() { return VN; } };
 const steam = { async getAppDetails() { return null; } };
 
-function fixture({ titles = [], games = [] } = {}) {
+function fixture({ titles = [], games = [], coversPath = null, screenshotsPath = null } = {}) {
   const state = { titles, games, favorites: [] };
 
   /** Raw stored Game object (mutations must land here). */
@@ -102,8 +105,8 @@ function fixture({ titles = [], games = [] } = {}) {
   app.decorate('prisma', prisma);
   app.decorate('vndbClient', vndb);
   app.decorate('steamClient', steam);
-  app.decorate('coversPath', null);
-  app.decorate('screenshotsPath', null);
+  app.decorate('coversPath', coversPath);
+  app.decorate('screenshotsPath', screenshotsPath);
   app.addHook('onRequest', async (request) => { request.user = { userId: 'user' }; });
   return { app, state, prisma };
 }
@@ -185,7 +188,7 @@ test('Legacy Game refresh falls back to Game-only for an unmapped Game', async (
   const { app, state } = await appFor(t, { titles: [], games: [orphan] });
 
   const res = await app.inject({ method: 'POST', url: `/api/v1/metadata/${orphan.id}/refresh`, payload: {} });
-  assert.equal(res.statusCode, 200);
+  assert.equal(res.statusCode, 200, JSON.stringify(res.json()));
   assert.equal(res.json().vndbId, 'v17');
   assert.equal(state.games[0].vndbId, 'v17');
 });
@@ -221,4 +224,51 @@ test('Legacy Game PATCH falls back to Game-only for an unmapped Game', async (t)
   assert.equal(res.json().vndbTitle, 'Orphan Edit');
   assert.equal(state.games[0].vndbTitle, 'Orphan Edit');
   assert.equal(state.games[0].metadataSource, 'manual');
+});
+
+test('H. mapped legacy Game refresh creates Title-owned media, not Game-keyed media', async (t) => {
+  const covers = await mkdtemp(join(tmpdir(), 'vnm-map-covers-'));
+  const shots = await mkdtemp(join(tmpdir(), 'vnm-map-shots-'));
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({ ok: true, statusText: 'OK', arrayBuffer: async () => Buffer.from('img') });
+  t.after(async () => {
+    globalThis.fetch = origFetch;
+    await rm(covers, { recursive: true, force: true });
+    await rm(shots, { recursive: true, force: true });
+  });
+
+  const a = game('a'.repeat(32));
+  const b = game('b'.repeat(32));
+  a.archiveItemId = 'i1';
+  const { app, state } = await appFor(t, {
+    titles: [title({ archiveItems: [item('i1', a), item('i2', b)] })],
+    games: [a, b], coversPath: covers, screenshotsPath: shots,
+  });
+
+  const res = await app.inject({ method: 'POST', url: `/api/v1/metadata/${a.id}/refresh`, payload: {} });
+  assert.equal(res.statusCode, 200);
+  assert.equal(state.titles[0].coverPath, `/covers/titles/${uuid}.jpg`);
+  assert.equal(state.titles[0].archiveItems[1].game.coverPath, `/covers/titles/${uuid}.jpg`);
+  await access(join(covers, 'titles', `${uuid}.jpg`));
+  await assert.rejects(access(join(covers, `${a.id}.jpg`)));
+});
+
+test('I. unmapped legacy Game refresh keeps Game-keyed media', async (t) => {
+  const covers = await mkdtemp(join(tmpdir(), 'vnm-orphan-covers-'));
+  const shots = await mkdtemp(join(tmpdir(), 'vnm-orphan-shots-'));
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({ ok: true, statusText: 'OK', arrayBuffer: async () => Buffer.from('img') });
+  t.after(async () => {
+    globalThis.fetch = origFetch;
+    await rm(covers, { recursive: true, force: true });
+    await rm(shots, { recursive: true, force: true });
+  });
+
+  const orphan = game('c'.repeat(32), { extractedTitle: 'Canonical VN' });
+  const { app, state } = await appFor(t, { titles: [], games: [orphan], coversPath: covers, screenshotsPath: shots });
+
+  const res = await app.inject({ method: 'POST', url: `/api/v1/metadata/${orphan.id}/refresh`, payload: {} });
+  assert.equal(res.statusCode, 200, JSON.stringify(res.json()));
+  assert.equal(state.games[0].coverPath, `/covers/${orphan.id}.jpg`);
+  await access(join(covers, `${orphan.id}.jpg`));
 });

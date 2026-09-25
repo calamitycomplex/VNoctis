@@ -61,6 +61,44 @@ test('serializeTitle exposes an authoritative metadata block with parsed arrays'
   assert.equal(dto.metadata.coverPath, '/covers/title.jpg');
   assert.deepEqual(dto.metadata.tags, [{ id: 't1', name: 'Tag' }]);
   assert.deepEqual(dto.metadata.screenshots, ['https://img/1.jpg']);
+  assert.equal(dto.metadata.coverUrl, `/api/v1/covers/titles/${title().id}`);
+  assert.deepEqual(dto.metadata.screenshotUrls, ['https://img/1.jpg']);
+});
+
+test('serializeTitleMetadata exposes a Title coverUrl from a single legacy Game cover', () => {
+  const dto = serializeTitle(title());
+  assert.equal(dto.metadata.coverUrl, `/api/v1/covers/titles/${title().id}`);
+});
+
+test('serializeTitleMetadata withholds coverUrl when legacy covers disagree', () => {
+  const dto = serializeTitle(title({
+    coverPath: null,
+    archiveItems: [
+      item({ game: game({ coverPath: '/covers/a.jpg' }) }),
+      item({ id: 'item-2', game: game({ coverPath: '/covers/b.jpg' }) }),
+    ],
+  }));
+  assert.equal(dto.metadata.coverUrl, null);
+});
+
+test('serializeTitleMetadata does not borrow multiple differing legacy screenshot sets', () => {
+  const dto = serializeTitle(title({
+    screenshots: '[]',
+    archiveItems: [
+      item({ game: game({ screenshots: '[\"a.jpg\"]' }) }),
+      item({ id: 'item-2', game: game({ screenshots: '[\"b.jpg\"]' }) }),
+    ],
+  }));
+  assert.deepEqual(dto.metadata.screenshotUrls, []);
+
+  const shared = serializeTitle(title({
+    screenshots: '[]',
+    archiveItems: [
+      item({ game: game({ screenshots: '[\"a.jpg\"]' }) }),
+      item({ id: 'item-2', game: game({ screenshots: '[\"a.jpg\"]' }) }),
+    ],
+  }));
+  assert.deepEqual(shared.metadata.screenshotUrls, ['a.jpg']);
 });
 
 test('serializeTitleMetadata fails safe on malformed JSON and defaults', () => {

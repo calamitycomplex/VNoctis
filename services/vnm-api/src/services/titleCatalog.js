@@ -134,8 +134,34 @@ export function serializeTitle(title, favoriteGameIds) {
  *
  * Malformed tags/screenshots JSON fails safe to an empty array, matching the
  * established legacy library behavior, so one bad row cannot 500 the list.
+ *
+ * `coverUrl`/`screenshotUrls` are usable client URLs. The cover URL points at
+ * the Title route whenever a cover is plausibly resolvable (Title-owned path,
+ * or exactly one distinct legacy Game cover). Multiple differing legacy covers
+ * yield null rather than an arbitrary choice. Screenshots fall back to a single
+ * unambiguous legacy Game set only when the Title has none of its own.
  */
 export function serializeTitleMetadata(title) {
+  const archiveItems = title.archiveItems ?? [];
+
+  const titleCover = title.coverPath ?? null;
+  const distinctLegacyCovers = new Set(
+    archiveItems.map((item) => item.game?.coverPath).filter(Boolean),
+  );
+  const hasResolvableCover = !!titleCover || distinctLegacyCovers.size === 1;
+  const coverUrl = hasResolvableCover && title.id ? `/api/v1/covers/titles/${title.id}` : null;
+
+  let screenshots = safeJsonParse(title.screenshots, []);
+  if (screenshots.length === 0) {
+    const legacySets = archiveItems
+      .map((item) => item.game?.screenshots)
+      .filter(Boolean)
+      .map((value) => safeJsonParse(value, []))
+      .filter((set) => set.length > 0);
+    const distinctLegacySets = new Set(legacySets.map((set) => JSON.stringify(set)));
+    if (distinctLegacySets.size === 1) screenshots = legacySets[0];
+  }
+
   return {
     vndbId: title.vndbId ?? null,
     vndbTitle: title.vndbTitle ?? null,
@@ -145,11 +171,13 @@ export function serializeTitleMetadata(title) {
     releaseDate: title.releaseDate ?? null,
     lengthMinutes: title.lengthMinutes ?? null,
     vndbRating: title.vndbRating ?? null,
-    coverPath: title.coverPath ?? null,
+    coverPath: titleCover,
     tags: safeJsonParse(title.tags, []),
-    screenshots: safeJsonParse(title.screenshots, []),
+    screenshots,
     metadataSource: title.metadataSource ?? 'unmatched',
     metadataFetchedAt: title.metadataFetchedAt ?? null,
+    coverUrl,
+    screenshotUrls: screenshots,
   };
 }
 
