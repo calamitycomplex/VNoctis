@@ -1,67 +1,38 @@
 import { createWriteStream } from 'node:fs';
-import { rm, mkdir, stat, rename, cp } from 'node:fs/promises';
-import { join, basename, extname } from 'node:path';
+import { rm, stat } from 'node:fs/promises';
+import { join, basename } from 'node:path';
 import { tmpdir } from 'node:os';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { scanGamesDirectory } from '../services/scanner.js';
-import { runBatchEnrichment } from '../services/enrichment.js';
-import { extractRpaArchives, pathExists } from '../services/rpaExtractor.js';
+import { extractRpaArchives } from '../services/rpaExtractor.js';
+import {
+  ACCEPTED_LABEL,
+  detectArchiveType,
+  sanitiseFolderName,
+  stripArchiveExt,
+  resolveImportStagingRoot,
+  extractArchiveToStaging,
+} from '../services/importStaging.js';
 
 const execFileAsync = promisify(execFile);
 
-// ── Supported archive formats ──────────────────────────
-// Order matters — longest suffix first so `.tar.bz2` matches before `.bz2`.
-const ARCHIVE_FORMATS = [
-  { ext: '.tar.bz2', type: 'tar.bz2' },
-  { ext: '.zip', type: 'zip' },
-  { ext: '.rar', type: 'rar' },
-];
-
-const ACCEPTED_EXTENSIONS = ARCHIVE_FORMATS.map((f) => f.ext);
-const ACCEPTED_LABEL = ACCEPTED_EXTENSIONS.join(', ');
-
 /**
- * Detect the archive type from a filename.
+ * Extract an archive into application-owned import staging.
  *
- * @param {string} filename
- * @returns {{ ext: string, type: string } | null}
- */
-function detectArchiveType(filename) {
-  const lower = filename.toLowerCase();
-  for (const fmt of ARCHIVE_FORMATS) {
-    if (lower.endsWith(fmt.ext)) return fmt;
-  }
-  return null;
-}
-
-/**
- * Strip the archive extension from a filename, handling compound
- * extensions like `.tar.bz2`.
- *
- * @param {string} filename
- * @returns {string}
- */
-function stripArchiveExt(filename) {
-  const fmt = detectArchiveType(filename);
-  if (!fmt) return basename(filename, extname(filename));
-  return filename.slice(0, filename.length - fmt.ext.length);
-}
-
-/**
- * Extract an archive into the games directory and trigger a scan.
- * Supports ZIP, tar.bz2, and RAR archives.
+ * `GAMES_PATH` is authoritative and treated as read-only here: extraction,
+ * chmod, and RPA processing all happen inside `stagingRoot`. Staged material is
+ * not promoted into the archive and no `Game`/`ArchiveItem`/`Title` record is
+ * created; that is made explicit by the returned `staged`/`promoted` flags.
  *
  * @param {string} tmpPath - Path to the temp archive file.
  * @param {string} originalName - Original filename (used for folder inference).
- * @param {string} gamesPath - The games root directory.
- * @param {import('fastify').FastifyInstance} fastify
+ * @param {string} stagingRoot - Application-owned import staging root.
  * @param {import('pino').Logger} logger
- * @returns {Promise<{ folderName: string, path: string }>}
+ * @returns {Promise<{ folderName: string, stagingId: string, path: string, staged: boolean, promoted: boolean }>}
  */
-async function extractAndScan(tmpPath, originalName, gamesPath, fastify, logger) {
+async function extractAndStage(tmpPath, originalName, stagingRoot, logger) {
   const archiveType = detectArchiveType(originalName);
   if (!archiveType) {
     throw Object.assign(new Error(`Unsupported archive format. Accepted: ${ACCEPTED_LABEL}`), {
@@ -70,251 +41,30 @@ async function extractAndScan(tmpPath, originalName, gamesPath, fastify, logger)
     });
   }
 
-  // Determine target folder name
-  const singleFolder = await getSingleTopLevelFolder(tmpPath, archiveType.type);
-  let folderName;
+  const { folderName, stagingId, path: extractedPath } = await extractArchiveToStaging({
+    archivePath: tmpPath,
+    originalName,
+    type: archiveType.type,
+    stagingRoot,
+    logger,
+  });
 
-  if (singleFolder) {
-    folderName = sanitiseFolderName(singleFolder);
-    logger.info?.({ folderName }, 'Archive has single top-level folder');
-  } else {
-    folderName = sanitiseFolderName(stripArchiveExt(basename(originalName)));
-    logger.info?.({ folderName }, 'Archive has multiple top-level entries, using filename');
-  }
-
-  if (!folderName) {
-    throw Object.assign(new Error('Could not determine a valid folder name from the archive.'), {
-      statusCode: 400,
-      code: 'INVALID_FOLDER_NAME',
-    });
-  }
-
-  const extractedPath = join(gamesPath, folderName);
-
-  // Check for name collision
-  if (await pathExists(extractedPath)) {
-    throw Object.assign(
-      new Error(`A game folder named "${folderName}" already exists. Rename the archive or remove the existing game first.`),
-      { statusCode: 409, code: 'FOLDER_EXISTS' }
-    );
-  }
-
-  // Extract the archive
-  await extractArchive(tmpPath, archiveType.type, gamesPath, extractedPath, singleFolder, logger);
-
-  // Verify extraction produced the expected directory
-  if (!(await pathExists(extractedPath))) {
-    throw Object.assign(new Error('Archive extraction did not produce the expected game folder.'), {
-      statusCode: 500,
-      code: 'EXTRACTION_FAILED',
-    });
-  }
-
-  // Ensure all extracted entries are world-readable/writable — archives can
-  // embed restrictive permission bits that prevent later access or deletion.
+  // Permission normalisation applies only inside staging.
   try {
     await execFileAsync('chmod', ['-R', '777', extractedPath]);
   } catch (chmodErr) {
-    logger.warn?.({ err: chmodErr.message, path: extractedPath }, 'Failed to fix permissions on extracted game folder');
+    logger.warn?.(
+      { err: chmodErr.message, path: extractedPath },
+      'Failed to fix permissions on staged import'
+    );
   }
 
-  // Extract .rpa archives so the builder doesn't choke on large monoliths
+  // RPA extraction/removal applies only inside staging.
   await extractRpaArchives(extractedPath, logger);
 
-  logger.info?.({ folderName, path: extractedPath }, 'Game archive extracted successfully');
+  logger.info?.({ folderName, stagingId, path: extractedPath }, 'Archive staged for import');
 
-  // Trigger a library scan in background
-  scanGamesDirectory(gamesPath, fastify.prisma, fastify.log)
-    .then(async (result) => {
-      fastify.log.info(
-        { found: result.found, new: result.new, unavailable: result.unavailable },
-        'Post-import scan completed'
-      );
-      if (fastify.vndbClient && fastify.coversPath) {
-        try {
-          const enrichResult = await runBatchEnrichment(
-            fastify.prisma, fastify.vndbClient, fastify.coversPath, fastify.log
-          );
-          fastify.log.info(
-            { enriched: enrichResult.enriched, failed: enrichResult.failed, skipped: enrichResult.skipped },
-            'Post-import enrichment completed'
-          );
-        } catch (enrichErr) {
-          fastify.log.warn({ err: enrichErr.message }, 'Post-import enrichment failed');
-        }
-      }
-    })
-    .catch((scanErr) => {
-      fastify.log.warn({ err: scanErr.message }, 'Post-import scan failed');
-    });
-
-  return { folderName, path: extractedPath };
-}
-
-/**
- * Run the correct extraction command for the archive type.
- *
- * @param {string} archivePath - Path to the archive.
- * @param {string} type - Archive type ('zip', 'tar.bz2', 'rar').
- * @param {string} gamesPath - The games root directory.
- * @param {string} extractedPath - Target extraction directory.
- * @param {string|null} singleFolder - The single top-level folder name, or null.
- * @param {import('pino').Logger} logger
- */
-async function extractArchive(archivePath, type, gamesPath, extractedPath, singleFolder, logger) {
-  logger.info?.({ type, archivePath, singleFolder: !!singleFolder }, 'Extracting archive');
-
-  // Large archives can produce substantial stdout — increase maxBuffer to 50 MB
-  const execOpts = { maxBuffer: 50 * 1024 * 1024 };
-
-  if (type === 'zip') {
-    if (singleFolder) {
-      await execFileAsync('unzip', ['-o', archivePath, '-d', gamesPath], execOpts);
-    } else {
-      await mkdir(extractedPath, { recursive: true });
-      await execFileAsync('unzip', ['-o', archivePath, '-d', extractedPath], execOpts);
-    }
-  } else if (type === 'tar.bz2') {
-    if (singleFolder) {
-      await execFileAsync('tar', ['xjf', archivePath, '-C', gamesPath], execOpts);
-    } else {
-      await mkdir(extractedPath, { recursive: true });
-      await execFileAsync('tar', ['xjf', archivePath, '-C', extractedPath], execOpts);
-    }
-  } else if (type === 'rar') {
-    if (singleFolder) {
-      // 7z extracts into the target dir, preserving the internal folder structure
-      // Note: -o flag must be directly followed by the path (no space)
-      await execFileAsync('7z', ['x', archivePath, `-o${gamesPath}`, '-y'], execOpts);
-    } else {
-      await mkdir(extractedPath, { recursive: true });
-      await execFileAsync('7z', ['x', archivePath, `-o${extractedPath}`, '-y'], execOpts);
-    }
-  }
-}
-
-/**
- * Sanitise a folder name — strip path traversal and dangerous characters.
- *
- * @param {string} name
- * @returns {string}
- */
-function sanitiseFolderName(name) {
-  return name
-    .replace(/\.\./g, '')
-    .replace(/[/\\:*?"<>|]/g, '')
-    .replace(/^\s+|\s+$/g, '')
-    .replace(/^\.+/, '');
-}
-
-/**
- * List all entry paths inside an archive (file paths only).
- *
- * @param {string} archivePath
- * @param {string} type - 'zip' | 'tar.bz2' | 'rar'
- * @returns {Promise<string[]>}
- */
-async function listArchiveEntries(archivePath, type) {
-  try {
-    let stdout;
-
-    // Large archives can produce substantial stdout — increase maxBuffer to 50 MB
-    const execOpts = { maxBuffer: 50 * 1024 * 1024 };
-
-    if (type === 'zip') {
-      // Use unzip -l and parse output — same robust parsing as before
-      ({ stdout } = await execFileAsync('unzip', ['-l', archivePath], execOpts));
-      return parseUnzipListing(stdout);
-    } else if (type === 'tar.bz2') {
-      ({ stdout } = await execFileAsync('tar', ['tjf', archivePath], execOpts));
-      return stdout.split('\n').filter((l) => l.trim());
-    } else if (type === 'rar') {
-      // 7z l -slt gives technical listing with "Path = <name>" lines
-      ({ stdout } = await execFileAsync('7z', ['l', '-slt', archivePath], execOpts));
-      const paths = [];
-      for (const line of stdout.split('\n')) {
-        const match = line.match(/^Path = (.+)$/);
-        if (match) paths.push(match[1].trim());
-      }
-      // First Path entry is the archive itself — skip it
-      return paths.slice(1);
-    }
-
-    return [];
-  } catch {
-    return [];
-  }
-}
-
-/**
- * Parse the output of `unzip -l` into a list of entry names.
- *
- * @param {string} stdout
- * @returns {string[]}
- */
-function parseUnzipListing(stdout) {
-  const lines = stdout.split('\n');
-  const entryNames = [];
-  let inEntries = false;
-
-  for (const line of lines) {
-    if (line.match(/^-{4,}/)) {
-      if (inEntries) break; // second separator = end of entries
-      inEntries = true;
-      continue;
-    }
-    if (!inEntries) continue;
-
-    // Extract the filename portion (last column, after the date/time)
-    const match = line.match(/\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\s+(.+)$/);
-    if (match) {
-      entryNames.push(match[1]);
-    }
-  }
-
-  return entryNames;
-}
-
-/**
- * Inspect an archive and determine if it has a single top-level directory.
- * Returns the name of that directory, or null if the archive has multiple
- * top-level entries.
- *
- * @param {string} archivePath
- * @param {string} type - 'zip' | 'tar.bz2' | 'rar'
- * @returns {Promise<string|null>} The single top-level folder name, or null.
- */
-async function getSingleTopLevelFolder(archivePath, type) {
-  try {
-    const entryNames = await listArchiveEntries(archivePath, type);
-    if (entryNames.length === 0) return null;
-
-    // Collect unique top-level items (normalise backslashes for Windows-created archives)
-    const topLevel = new Set();
-    for (const name of entryNames) {
-      const normalised = name.replace(/\\/g, '/');
-      const parts = normalised.split('/');
-      if (parts[0]) {
-        topLevel.add(parts[0]);
-      }
-    }
-
-    // If there's exactly one top-level entry and it appears as a directory
-    if (topLevel.size === 1) {
-      const folderName = [...topLevel][0];
-      // Verify it's actually used as a folder (has children or is listed with trailing /)
-      const hasChildren = entryNames.some((n) => {
-        const norm = n.replace(/\\/g, '/');
-        return norm.startsWith(folderName + '/') && norm !== folderName + '/';
-      });
-      const isFolder = entryNames.some((n) => n.replace(/\\/g, '/') === folderName + '/') || hasChildren;
-      if (isFolder) return folderName;
-    }
-
-    return null;
-  } catch {
-    return null;
-  }
+  return { folderName, stagingId, path: extractedPath, staged: true, promoted: false };
 }
 
 /**
@@ -324,19 +74,25 @@ async function getSingleTopLevelFolder(archivePath, type) {
  * @param {import('fastify').FastifyInstance} fastify
  */
 export default async function importRoutes(fastify) {
-  const gamesPath = process.env.GAMES_PATH || '/games';
+  // Application-owned writable staging root. Defaults to
+  // `${WEB_BUILDS_PATH}/imports`; override with IMPORT_STAGING_PATH.
+  const importStagingPath = resolveImportStagingRoot({
+    basePath: process.env.WEB_BUILDS_PATH,
+    configuredPath: process.env.IMPORT_STAGING_PATH,
+  });
 
   /**
    * POST /library/import
    *
-   * Accepts a multipart archive upload (.zip, .tar.bz2, or .rar), extracts it
-   * into /games/<folder>, then triggers a library scan so the new game is
-   * detected.
+   * Accepts a multipart archive upload (.zip, .tar.bz2, or .rar) and extracts
+   * it into application-owned import staging. The authoritative `GAMES_PATH`
+   * archive is left untouched; staged material is not promoted into it yet.
+   * A library scan of the authoritative archive is triggered afterwards.
    *
    * Archive structure handling:
-   *   1. Single top-level folder → extract directly to /games/ (folder preserved)
+   *   1. Single top-level folder → folder preserved in staging
    *   2. Multiple top-level entries → infer folder name from archive filename,
-   *      create /games/<archiveName>/, extract into it
+   *      create <staging>/<archiveName>/ and extract into it
    */
   const maxBodySize =
     (parseInt(process.env.MAX_IMPORT_SIZE_MB, 10) || 24576) * 1024 * 1024;
@@ -378,13 +134,22 @@ export default async function importRoutes(fastify) {
 
       request.log.info({ filename: originalName, size: tmpStat.size, type: archiveType.type }, 'Archive file uploaded to temp');
 
-      // ── 3. Extract and scan ───────────────────────────
-      const result = await extractAndScan(tmpPath, originalName, gamesPath, fastify, request.log);
+      // ── 3. Extract into staging ───────────────────────
+      const result = await extractAndStage(
+        tmpPath,
+        originalName,
+        importStagingPath,
+        request.log
+      );
 
       return {
         folderName: result.folderName,
+        stagingId: result.stagingId,
         path: result.path,
-        message: 'Game imported successfully. Library scan triggered.',
+        staged: true,
+        promoted: false,
+        message:
+          'Archive extracted into import staging. It is not promoted into the archive yet.',
       };
     } catch (err) {
       request.log.error({ err: err.message }, 'Import failed');
@@ -403,9 +168,9 @@ export default async function importRoutes(fastify) {
   /**
    * POST /library/import-url
    *
-   * Downloads an archive from a remote URL (.zip, .tar.bz2, or .rar), extracts
-   * it into /games/<folder>, then triggers a library scan. Streams NDJSON
-   * progress events back to the client.
+   * Downloads an archive from a remote URL (.zip, .tar.bz2, or .rar) and
+   * extracts it into application-owned import staging (GAMES_PATH untouched).
+   * Streams NDJSON progress events back to the client.
    *
    * Body: { "url": "https://example.com/game.zip" }
    *
@@ -546,16 +311,25 @@ export default async function importRoutes(fastify) {
 
       sendEvent({ phase: 'downloading', progress: 100, downloadedBytes: tmpStat.size, totalBytes: tmpStat.size });
 
-      // ── 2. Extract and scan ───────────────────────────
-      sendEvent({ phase: 'extracting', message: 'Extracting & scanning…' });
+      // ── 2. Extract into staging ───────────────────────
+      sendEvent({ phase: 'extracting', message: 'Extracting into import staging…' });
 
-      const result = await extractAndScan(tmpPath, inferredName, gamesPath, fastify, request.log);
+      const result = await extractAndStage(
+        tmpPath,
+        inferredName,
+        importStagingPath,
+        request.log
+      );
 
       sendEvent({
         phase: 'complete',
         folderName: result.folderName,
+        stagingId: result.stagingId,
         path: result.path,
-        message: 'Game imported successfully.',
+        staged: true,
+        promoted: false,
+        message:
+          'Archive extracted into import staging. It is not promoted into the archive yet.',
       });
     } catch (err) {
       request.log.error({ err: err.message, url }, 'URL import failed');
