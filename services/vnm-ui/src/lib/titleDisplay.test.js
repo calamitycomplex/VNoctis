@@ -5,6 +5,8 @@ import {
   cardFactsFor,
   cardTagsFor,
   coverUrlFor,
+  detailFactsFor,
+  detailTagsFor,
   displayTitleFor,
   formatLengthMinutes,
   originalTitleFor,
@@ -202,4 +204,51 @@ test('cardTagsFor returns non-spoiler tag names, capped at 3, Title metadata fir
     archiveItems: [item({ game: { id: 'g1', tags: [{ name: 'A' }] } }), item({ id: 'item-2', game: { id: 'g2', tags: [{ name: 'B' }] } })],
   });
   assert.deepEqual(cardTagsFor(multi), []);
+});
+
+test('detailFactsFor returns rating/year/length/developer and omits missing values', () => {
+  const full = title({
+    name: 'Canonical',
+    metadata: { vndbRating: 8.4, releaseDate: '2021-03-04', lengthMinutes: 1080, developer: 'Studio' },
+  });
+  assert.deepEqual(detailFactsFor(full), { rating: 8.4, year: '2021', length: '18h', developer: 'Studio' });
+
+  assert.deepEqual(detailFactsFor(title({})) , { rating: null, year: null, length: null, developer: null });
+
+  // Single-Game compatibility fallback.
+  const withGame = title({ archiveItems: [item({ game: { id: 'g1', vndbRating: 7, releaseDate: '2015-01-01', lengthMinutes: 120, developer: 'Game Dev' } })] });
+  assert.deepEqual(detailFactsFor(withGame), { rating: 7, year: '2015', length: '2h', developer: 'Game Dev' });
+});
+
+test('detailFactsFor/detailTagsFor never borrow one Game from a multi-release Title', () => {
+  const multi = title({
+    name: 'Canonical',
+    archiveItems: [
+      item({ game: { id: 'g1', vndbRating: 9, developer: 'A', tags: [{ name: 'A' }] } }),
+      item({ id: 'item-2', game: { id: 'g2', vndbRating: 5, developer: 'B', tags: [{ name: 'B' }] } }),
+    ],
+  });
+  assert.deepEqual(detailFactsFor(multi), { rating: null, year: null, length: null, developer: null });
+  assert.deepEqual(detailTagsFor(multi), []);
+});
+
+test('detailTagsFor filters spoilers, caps, prefers Title metadata, and is malformed-safe', () => {
+  const t = title({ metadata: { tags: [{ name: 'A' }, { name: 'B', spoiler: 2 }, { name: 'C' }] } });
+  assert.deepEqual(detailTagsFor(t), ['A', 'C']);
+
+  const many = title({ metadata: { tags: Array.from({ length: 30 }, (_, i) => ({ name: `T${i}` })) } });
+  assert.equal(detailTagsFor(many).length, 16);
+  assert.equal(detailTagsFor(many, 5).length, 5);
+
+  assert.deepEqual(detailTagsFor(title({})), []);
+  assert.deepEqual(detailTagsFor(title({ metadata: { tags: 'nope' } })), []);
+
+  const withGame = title({ archiveItems: [item({ game: { id: 'g1', tags: [{ name: 'GameTag' }] } })] });
+  assert.deepEqual(detailTagsFor(withGame), ['GameTag']);
+});
+
+test('detail helpers are safe for a game:null Title', () => {
+  const archiveOnly = title({ metadata: { vndbTitle: 'Archive Only', developer: 'D' }, archiveItems: [item({ game: null })] });
+  assert.equal(detailFactsFor(archiveOnly).developer, 'D');
+  assert.deepEqual(detailTagsFor(archiveOnly), []);
 });

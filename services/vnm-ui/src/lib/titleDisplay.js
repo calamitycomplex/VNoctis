@@ -168,11 +168,10 @@ export function cardFactsFor(title) {
 }
 
 /**
- * Display-only tag names for the card: non-spoiler tags, capped, stable order.
- * Title metadata is preferred with a single-Game fallback; malformed input is
- * treated as empty.
+ * Non-spoiler tag names, capped, stable order. Title metadata is preferred with
+ * a single-Game fallback; malformed input is treated as empty.
  */
-export function cardTagsFor(title, max = 3) {
+function nonSpoilerTagNames(title, max) {
   const meta = title?.metadata ?? {};
   const game = singleGameFor(title);
   const source = Array.isArray(meta.tags) && meta.tags.length > 0
@@ -183,6 +182,31 @@ export function cardTagsFor(title, max = 3) {
     .filter((tag) => !(tag.spoiler && tag.spoiler > 0))
     .slice(0, max)
     .map((tag) => tag.name.trim());
+}
+
+/** Display-only tag names for the compact card. */
+export function cardTagsFor(title, max = 3) {
+  return nonSpoilerTagNames(title, max);
+}
+
+/** Display-only tag names for the richer detail modal (larger cap). */
+export function detailTagsFor(title, max = 16) {
+  return nonSpoilerTagNames(title, max);
+}
+
+/**
+ * Detail facts derived from Title metadata (single-Game fallback only).
+ * Missing values are null so the detail modal can omit them cleanly.
+ */
+export function detailFactsFor(title) {
+  if (!title) return { rating: null, year: null, length: null, developer: null };
+  const meta = logicalMetadataFor(title);
+  return {
+    rating: meta.vndbRating ?? null,
+    year: releaseYearFor(title),
+    length: formatLengthMinutes(meta.lengthMinutes),
+    developer: meta.developer ?? null,
+  };
 }
 
 /** True when a Title has more than one ArchiveItem (a multi-release Title). */
