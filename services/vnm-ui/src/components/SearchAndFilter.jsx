@@ -33,6 +33,14 @@ export default function SearchAndFilter({
   availableTags,
   activeFilterCount,
   onClearFilters,
+  // Optional Title-API filter. When provided, a Source group is shown.
+  sourceAvailableFilter,
+  onSourceAvailableChange,
+  // Title API does not support these Game-level filters; callers may hide them.
+  showRatingFilter = true,
+  showBuildFilter = true,
+  showMetadataFilter = true,
+  showTagFilters = true,
 }) {
   const [localQuery, setLocalQuery] = useState(searchQuery);
   const [tagsExpanded, setTagsExpanded] = useState(() => {
@@ -95,6 +103,12 @@ export default function SearchAndFilter({
     { value: 'unmatched', label: 'Unmatched' },
   ];
 
+  const sourceOptions = [
+    { value: '', label: 'All' },
+    { value: 'true', label: 'Available' },
+    { value: 'false', label: 'Unavailable' },
+  ];
+
   return (
     <div className="space-y-3">
       {/* Search input */}
@@ -128,43 +142,63 @@ export default function SearchAndFilter({
 
       {/* Filter chips */}
       <div className="flex flex-wrap gap-x-4 gap-y-2">
+        {/* Source availability group (Title-level aggregate) */}
+        {onSourceAvailableChange && (
+          <FilterGroup label="Source">
+            {sourceOptions.map((opt) => (
+              <Chip
+                key={opt.value || 'all'}
+                label={opt.label}
+                active={sourceAvailableFilter === opt.value}
+                onClick={() => onSourceAvailableChange(opt.value)}
+              />
+            ))}
+          </FilterGroup>
+        )}
+
         {/* Rating filter group */}
-        <FilterGroup label="Rating">
-          {ratingOptions.map((opt) => (
-            <Chip
-              key={opt.value}
-              label={opt.label}
-              active={ratingFilter === opt.value}
-              onClick={() => onRatingFilterChange(opt.value)}
-            />
-          ))}
-        </FilterGroup>
+        {showRatingFilter && (
+          <FilterGroup label="Rating">
+            {ratingOptions.map((opt) => (
+              <Chip
+                key={opt.value}
+                label={opt.label}
+                active={ratingFilter === opt.value}
+                onClick={() => onRatingFilterChange(opt.value)}
+              />
+            ))}
+          </FilterGroup>
+        )}
 
         {/* Build status group */}
-        <FilterGroup label="Build">
-          {buildOptions.map((opt) => (
-            <Chip
-              key={opt.value}
-              label={opt.label}
-              active={buildStatusFilter === opt.value}
-              onClick={() => onBuildStatusFilterChange(opt.value)}
-            />
-          ))}
-        </FilterGroup>
+        {showBuildFilter && (
+          <FilterGroup label="Build">
+            {buildOptions.map((opt) => (
+              <Chip
+                key={opt.value}
+                label={opt.label}
+                active={buildStatusFilter === opt.value}
+                onClick={() => onBuildStatusFilterChange(opt.value)}
+              />
+            ))}
+          </FilterGroup>
+        )}
 
         {/* Metadata group */}
-        <FilterGroup label="Metadata">
-          {metadataOptions.map((opt) => (
-            <Chip
-              key={opt.value}
-              label={opt.label}
-              active={metadataFilter === opt.value}
-              onClick={() => onMetadataFilterChange(opt.value)}
-            />
-          ))}
-        </FilterGroup>
+        {showMetadataFilter && (
+          <FilterGroup label="Metadata">
+            {metadataOptions.map((opt) => (
+              <Chip
+                key={opt.value}
+                label={opt.label}
+                active={metadataFilter === opt.value}
+                onClick={() => onMetadataFilterChange(opt.value)}
+              />
+            ))}
+          </FilterGroup>
+        )}
         {/* Tags toggle button */}
-        {availableTags.length > 0 && (
+        {showTagFilters && availableTags.length > 0 && (
           <TagsToggle
             count={selectedTags.size}
             expanded={tagsExpanded}
@@ -178,7 +212,7 @@ export default function SearchAndFilter({
       </div>
 
       {/* Collapsible tag chips */}
-      {availableTags.length > 0 && (
+      {showTagFilters && availableTags.length > 0 && (
         <div
           className={`overflow-hidden transition-all duration-300 ease-in-out ${
             tagsExpanded ? 'max-h-40 opacity-100' : 'max-h-0 opacity-0'

@@ -21,8 +21,8 @@
  *   onStatusClick?: (status: string) => void,
  * }} props
  */
-export default function SortBar({ filteredCount, totalCount, sortBy, onSortChange, currentPage, pageSize, showAll, hiddenCount, showHidden, onToggleShowHidden, favoriteCount = 0, showFavorites = false, onToggleShowFavorites, unmatchedCount = 0, buildingCount = 0, queuedCount = 0, onStatusClick, className = '' }) {
-  const sortOptions = [
+export default function SortBar({ filteredCount, totalCount, sortBy, onSortChange, currentPage, pageSize, showAll, hiddenCount, showHidden, onToggleShowHidden, favoriteCount = 0, showFavorites = false, onToggleShowFavorites, unmatchedCount = 0, buildingCount = 0, queuedCount = 0, onStatusClick, className = '', sortOptions: sortOptionsProp, entityLabel = 'game' }) {
+  const sortOptions = sortOptionsProp || [
     { value: 'title-asc', label: 'Title (A–Z)' },
     { value: 'title-desc', label: 'Title (Z–A)' },
     { value: 'rating-desc', label: 'Rating (High → Low)' },
@@ -53,7 +53,7 @@ export default function SortBar({ filteredCount, totalCount, sortBy, onSortChang
                     <span className="text-gray-700 dark:text-gray-200 font-medium">{totalCount}</span>
                   </>
                 )}
-                {' '}{totalCount === 1 ? 'game' : 'games'}
+                {' '}{totalCount === 1 ? entityLabel : `${entityLabel}s`}
               </>
             ) : (
               <>
@@ -70,14 +70,14 @@ export default function SortBar({ filteredCount, totalCount, sortBy, onSortChang
                     {' '}total)
                   </>
                 )}
-                {' '}{totalCount === 1 ? 'game' : 'games'}
+                {' '}{totalCount === 1 ? entityLabel : `${entityLabel}s`}
               </>
             )
           ) : (
             <>
               Showing{' '}
               <span className="text-gray-700 dark:text-gray-200 font-medium">0</span>
-              {' '}{totalCount === 1 ? 'game' : 'games'}
+              {' '}{totalCount === 1 ? entityLabel : `${entityLabel}s`}
             </>
           )}
         </p>
