@@ -22,7 +22,7 @@ services:
     expose:
       - "3001"
     volumes:
-      - ${VNM_ROOT}/games:/games:rw
+      - ${VNM_ROOT}/games:/games:ro
       - ${VNM_ROOT}/data:/data
       - ${VNM_ROOT}/covers:/covers
       - ${VNM_ROOT}/screenshots:/screenshots
@@ -70,7 +70,7 @@ services:
     expose:
       - "3002"
     volumes:
-      - ${VNM_ROOT}/games:/games:rw
+      - ${VNM_ROOT}/games:/games:ro
       - ${VNM_ROOT}/renpy-sdk:/renpy-sdk:rw
       - ${VNM_ROOT}/web-builds:/web-builds
       - ${VNM_ROOT}/data/logs:/data/logs

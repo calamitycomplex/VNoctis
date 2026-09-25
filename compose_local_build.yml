@@ -27,12 +27,12 @@ services:
     expose:
       - "3001"
     volumes:
-      - ${VNM_ROOT}/games:/games:rw
+      - ${VNM_ROOT}/games:/games:ro
       - vnm-data:/data
       - vnm-logs:/data/logs
       - vnm-covers:/covers
       - vnm-screenshots:/screenshots
-      - vnm-web-builds:/web-builds:ro
+      - vnm-web-builds:/web-builds:rw
     environment:
       PUID: ${PUID}
       PGID: ${PGID}
@@ -76,7 +76,7 @@ services:
     expose:
       - "3002"
     volumes:
-      - ${VNM_ROOT}/games:/games:rw
+      - ${VNM_ROOT}/games:/games:ro
       - vnm-web-builds:/web-builds
       - ${VNM_ROOT}/renpy-sdk:/renpy-sdk:rw
       - vnm-logs:/data/logs
