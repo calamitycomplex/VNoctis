@@ -4,6 +4,13 @@ import { scanGamesDirectory } from '../services/scanner.js';
 import { runBatchEnrichment } from '../services/enrichment.js';
 import { downloadCover } from '../services/coverDownloader.js';
 import { removeScreenshots } from '../services/screenshotDownloader.js';
+import {
+  TITLE_SELECT,
+  loadFavoriteGameIds,
+  parsePagination,
+  buildTitleWhere,
+  serializeTitle,
+} from '../services/titleCatalog.js';
 
 /**
  * Parse JSON string fields (tags, screenshots) on a game object.
@@ -144,6 +151,96 @@ export default async function libraryRoutes(fastify) {
       ...parseGameJsonFields(g),
       favorite: favoriteSet.has(g.id),
     }));
+  });
+
+  /** Title IDs are UUIDs, unlike the legacy 32-character Game fingerprint. */
+  const TITLE_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+  /**
+   * GET /library/titles
+   * Title-centric paginated catalog read. Compatibility: /library and
+   * /library/:gameId remain Game-centric and unchanged.
+   *
+   * Query params:
+   *   search          - case-insensitive match on Title.name, ArchiveItem
+   *                     directoryName, or compatibility Game title fields
+   *   sort            - name (only supported field; default name)
+   *   order           - asc | desc (default asc)
+   *   sourceAvailable - true | false (Title-level aggregate)
+   *   page            - 1-based page (default 1)
+   *   pageSize        - items per page (default 50, max 100)
+   */
+  fastify.get('/library/titles', async (request, reply) => {
+    const { search, sort = 'name', order = 'asc', sourceAvailable } = request.query;
+
+    if (sort !== 'name') {
+      return reply.code(400).send({ error: { code: 'INVALID_SORT', message: 'sort must be name.' } });
+    }
+    if (order !== 'asc' && order !== 'desc') {
+      return reply.code(400).send({ error: { code: 'INVALID_ORDER', message: 'order must be asc or desc.' } });
+    }
+    if (sourceAvailable !== undefined && sourceAvailable !== 'true' && sourceAvailable !== 'false') {
+      return reply.code(400).send({
+        error: { code: 'INVALID_SOURCE_AVAILABLE', message: 'sourceAvailable must be true or false.' },
+      });
+    }
+
+    const pagination = parsePagination(request.query);
+    if (pagination.error) return reply.code(400).send({ error: pagination.error });
+
+    const where = buildTitleWhere({ search, sourceAvailable });
+    const orderBy = [{ name: order === 'desc' ? 'desc' : 'asc' }, { id: 'asc' }];
+
+    const [totalItems, titles] = await Promise.all([
+      fastify.prisma.title.count({ where }),
+      fastify.prisma.title.findMany({
+        where,
+        select: TITLE_SELECT,
+        orderBy,
+        skip: (pagination.page - 1) * pagination.pageSize,
+        take: pagination.pageSize,
+      }),
+    ]);
+
+    const favoriteGameIds = await loadFavoriteGameIds(fastify.prisma, request.user?.userId, titles);
+
+    return {
+      items: titles.map((title) => serializeTitle(title, favoriteGameIds)),
+      pagination: {
+        page: pagination.page,
+        pageSize: pagination.pageSize,
+        totalItems,
+        totalPages: Math.ceil(totalItems / pagination.pageSize),
+      },
+    };
+  });
+
+  /**
+   * GET /library/titles/:titleId
+   * Full Title detail, including every ArchiveItem and its nested compatibility Game.
+   */
+  fastify.get('/library/titles/:titleId', async (request, reply) => {
+    const { titleId } = request.params;
+
+    if (!TITLE_UUID.test(titleId)) {
+      return reply.code(400).send({
+        error: { code: 'INVALID_TITLE_ID', message: 'titleId must be a UUID.' },
+      });
+    }
+
+    const title = await fastify.prisma.title.findUnique({
+      where: { id: titleId },
+      select: TITLE_SELECT,
+    });
+
+    if (!title) {
+      return reply.code(404).send({
+        error: { code: 'TITLE_NOT_FOUND', message: `Title with id "${titleId}" not found.` },
+      });
+    }
+
+    const favoriteGameIds = await loadFavoriteGameIds(fastify.prisma, request.user?.userId, [title]);
+    return serializeTitle(title, favoriteGameIds);
   });
 
   /**
