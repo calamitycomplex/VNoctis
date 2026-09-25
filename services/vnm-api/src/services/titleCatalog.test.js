@@ -7,6 +7,7 @@ import {
   parsePagination,
   serializeGame,
   serializeTitle,
+  serializeTitleMetadata,
 } from './titleCatalog.js';
 
 const game = (overrides = {}) => ({
@@ -38,7 +39,36 @@ test('serializeTitle uses Title identity and aggregates availability from items'
   assert.equal(dto.archiveItems.length, 1);
   assert.equal(dto.archiveItems[0].directoryName, 'Dir');
   assert.equal(dto.archiveItems[0].game.id, 'g'.repeat(32));
-  assert.deepEqual(Object.keys(dto).sort(), ['archiveItems', 'createdAt', 'id', 'name', 'sourceAvailable', 'updatedAt']);
+  assert.deepEqual(Object.keys(dto).sort(), ['archiveItems', 'createdAt', 'id', 'metadata', 'name', 'sourceAvailable', 'updatedAt']);
+});
+
+test('serializeTitle exposes an authoritative metadata block with parsed arrays', () => {
+  const dto = serializeTitle(title({
+    vndbId: 'v17',
+    vndbTitle: 'VNDB Title',
+    synopsis: 'A synopsis',
+    developer: 'Dev',
+    metadataSource: 'auto',
+    coverPath: '/covers/title.jpg',
+    tags: '[{"id":"t1","name":"Tag"}]',
+    screenshots: '["https://img/1.jpg"]',
+  }));
+  assert.equal(dto.metadata.vndbId, 'v17');
+  assert.equal(dto.metadata.vndbTitle, 'VNDB Title');
+  assert.equal(dto.metadata.synopsis, 'A synopsis');
+  assert.equal(dto.metadata.developer, 'Dev');
+  assert.equal(dto.metadata.metadataSource, 'auto');
+  assert.equal(dto.metadata.coverPath, '/covers/title.jpg');
+  assert.deepEqual(dto.metadata.tags, [{ id: 't1', name: 'Tag' }]);
+  assert.deepEqual(dto.metadata.screenshots, ['https://img/1.jpg']);
+});
+
+test('serializeTitleMetadata fails safe on malformed JSON and defaults', () => {
+  const meta = serializeTitleMetadata({ tags: 'not json', screenshots: 'not json' });
+  assert.deepEqual(meta.tags, []);
+  assert.deepEqual(meta.screenshots, []);
+  assert.equal(meta.metadataSource, 'unmatched');
+  assert.equal(meta.vndbId, null);
 });
 
 test('Title.sourceAvailable is true when at least one item is available and false only when none are', () => {

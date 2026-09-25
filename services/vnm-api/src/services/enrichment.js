@@ -288,6 +288,325 @@ export async function runBatchEnrichment(prisma, vndbClient, coversPath, screens
   return { enriched, failed, skipped };
 }
 
+// ── Title-centric enrichment (Slice E) ──────────────────────
+//
+// Title is the authoritative destination for logical VN metadata. Compatibility
+// Game rows temporarily receive a mirrored copy so every existing Game-keyed
+// surface (GameDetailModal, Gallery, legacy /library, metadata routes) keeps
+// working during the compatibility period.
+
+/** Logical fields whose authoritative home is Title and which mirror to Game. */
+export const TITLE_LOGICAL_FIELDS = [
+  'vndbId',
+  'vndbTitle',
+  'vndbTitleOriginal',
+  'synopsis',
+  'developer',
+  'releaseDate',
+  'lengthMinutes',
+  'vndbRating',
+  'tags',
+  'screenshots',
+  'coverPath',
+  'metadataSource',
+  'metadataFetchedAt',
+];
+
+/**
+ * Map a VNDB VN result to Prisma-compatible Title update data.
+ * Same values as mapVnToGameData, minus the Game-only steamAppId.
+ */
+export function mapVnToTitleData(vn) {
+  return {
+    vndbId: vn.id || null,
+    vndbTitle: vn.title || null,
+    vndbTitleOriginal: vn.alttitle || null,
+    synopsis: cleanSynopsis(vn.description),
+    developer: vn.developers?.[0]?.name || null,
+    releaseDate: parseReleasedDate(vn.released),
+    lengthMinutes: vn.length_minutes || null,
+    vndbRating: vn.rating != null ? vn.rating / 10 : null,
+    tags: JSON.stringify(
+      vn.tags
+        ?.filter((t) => t.spoiler === 0)
+        ?.slice(0, 20)
+        ?.map((t) => ({ name: t.name, spoiler: t.spoiler })) || []
+    ),
+    screenshots: JSON.stringify(
+      vn.screenshots?.slice(0, 8)?.map((s) => s.url) || []
+    ),
+  };
+}
+
+/** Map a Steam appdetails response to Title logical update data (no steamAppId). */
+function mapSteamToTitleData(details) {
+  const tags = details.genres?.slice(0, 20)?.map((g) => ({ name: g.description, spoiler: 0 })) || [];
+  const screenshots = details.screenshots?.slice(0, 8)?.map((s) => s.path_full) || [];
+  return {
+    vndbTitle: details.name || null,
+    vndbTitleOriginal: null,
+    synopsis: details.short_description || details.about_the_game || null,
+    developer: details.developers?.[0] || null,
+    releaseDate: parseSteamReleaseDate(details.release_date),
+    lengthMinutes: null,
+    vndbRating: details.metacritic?.score != null ? details.metacritic.score / 10 : null,
+    tags: JSON.stringify(tags),
+    screenshots: JSON.stringify(screenshots),
+  };
+}
+
+/**
+ * Lookup candidates for a Title, most authoritative first.
+ * Title.name leads; discovered Game.extractedTitle values are safe fallbacks.
+ */
+export function titleLookupCandidates(title, games = []) {
+  const raw = [title?.name, ...games.map((game) => game?.extractedTitle)];
+  const seen = new Set();
+  const candidates = [];
+  for (const value of raw) {
+    const text = typeof value === 'string' ? value.trim() : '';
+    if (!text) continue;
+    const key = text.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    candidates.push(text);
+  }
+  return candidates;
+}
+
+/**
+ * Temporary media-storage adapter: pick one nested Game id purely as the
+ * on-disk filename owner for /covers/<id>.jpg and /screenshots/<id>/.
+ * This is NOT primary-release semantics; it only avoids duplicate downloads.
+ * Deterministic: available sources first, then Game id.
+ */
+export function pickMediaStorageGame(games = []) {
+  if (!games.length) return null;
+  return [...games].sort(
+    (a, b) => Number(b.sourceAvailable) - Number(a.sourceAvailable) || String(a.id).localeCompare(String(b.id)),
+  )[0];
+}
+
+/** Mirrorable logical subset present in the Title write payload. */
+export function buildGameMirror(titleData = {}) {
+  const mirror = {};
+  for (const field of TITLE_LOGICAL_FIELDS) {
+    if (field in titleData) mirror[field] = titleData[field];
+  }
+  return mirror;
+}
+
+/**
+ * Write Title logical metadata and mirror it to every nested Game inside one
+ * database transaction. `extraGameData` optionally adds Game-only per-target
+ * fields (e.g. steamAppId) that must ride along in the same transaction.
+ */
+export async function applyTitleLogicalWrite(db, titleId, titleData, games = [], extraGameData = {}) {
+  const updatedTitle = await db.title.update({ where: { id: titleId }, data: titleData });
+  const mirror = buildGameMirror(titleData);
+  for (const game of games) {
+    const extra = extraGameData[game.id];
+    if (Object.keys(mirror).length === 0 && !extra) continue;
+    await db.game.update({ where: { id: game.id }, data: { ...mirror, ...(extra || {}) } });
+  }
+  return updatedTitle;
+}
+
+/** Shared media download step used by VNDB/Steam Title enrichment. */
+async function downloadTitleMedia({ storageGame, coversPath, screenshotsPath, coverUrl, screenshotUrls = [] }) {
+  const data = {};
+  if (!storageGame) return data;
+
+  if (coversPath) {
+    try { await rm(join(coversPath, `${storageGame.id}.jpg`), { force: true }); } catch { /* ignore */ }
+    if (coverUrl) {
+      const localCover = await downloadCover(coverUrl, storageGame.id, coversPath);
+      if (localCover) data.coverPath = localCover;
+    }
+  }
+
+  if (screenshotsPath) {
+    await removeScreenshots(storageGame.id, screenshotsPath);
+    if (screenshotUrls.length > 0) {
+      const localPaths = await downloadScreenshots(screenshotUrls, storageGame.id, screenshotsPath);
+      data.screenshots = JSON.stringify(localPaths);
+    }
+  }
+  return data;
+}
+
+/** Apply a matched VNDB result to a Title and mirror to its Games. */
+async function applyTitleMatch(vn, title, games, prisma, coversPath, screenshotsPath) {
+  const data = mapVnToTitleData(vn);
+  const media = await downloadTitleMedia({
+    storageGame: pickMediaStorageGame(games),
+    coversPath,
+    screenshotsPath,
+    coverUrl: vn.image?.url || null,
+    screenshotUrls: vn.screenshots?.slice(0, 8)?.map((s) => s.url) || [],
+  });
+  Object.assign(data, media);
+  data.metadataSource = 'auto';
+  data.metadataFetchedAt = new Date();
+
+  return prisma.$transaction((tx) => applyTitleLogicalWrite(tx, title.id, data, games));
+}
+
+/** Mark a Title unmatched and mirror the source/timestamp to its Games. */
+async function markTitleUnmatched(title, games, prisma) {
+  const data = { metadataSource: 'unmatched', metadataFetchedAt: new Date() };
+  return prisma.$transaction((tx) => applyTitleLogicalWrite(tx, title.id, data, games));
+}
+
+/**
+ * Enrich one logical Title by searching VNDB for its most authoritative name.
+ * Lookup runs once per Title; the DB write is a single transaction that updates
+ * Title and mirrors logical fields to every nested Game.
+ */
+export async function enrichTitle(title, games, prisma, vndbClient, coversPath, screenshotsPath, logger) {
+  const log = logger || console;
+
+  if (title.metadataSource === 'manual') {
+    return title;
+  }
+
+  const [lookupText] = titleLookupCandidates(title, games);
+  if (!lookupText) {
+    return markTitleUnmatched(title, games, prisma);
+  }
+
+  try {
+    const results = await vndbClient.searchByTitle(lookupText);
+    if (!results.length) return markTitleUnmatched(title, games, prisma);
+
+    const matched = matchTitle(lookupText, results, vndbClient.matchThreshold);
+    if (!matched) return markTitleUnmatched(title, games, prisma);
+
+    return applyTitleMatch(matched.match, title, games, prisma, coversPath, screenshotsPath);
+  } catch (err) {
+    (log.error || log.log).call(log,
+      { event: 'title_enrichment_failed', titleId: title.id, lookupText, error: err.message },
+      `Failed to enrich title ${title.id} (${lookupText})`
+    );
+    return title;
+  }
+}
+
+/** Enrich a Title by fetching a specific VNDB ID (force-link). */
+export async function enrichTitleById(vndbId, title, games, prisma, vndbClient, coversPath, screenshotsPath, logger) {
+  const log = logger || console;
+  try {
+    const vn = await vndbClient.getById(vndbId);
+    if (!vn) return markTitleUnmatched(title, games, prisma);
+    return applyTitleMatch(vn, title, games, prisma, coversPath, screenshotsPath);
+  } catch (err) {
+    (log.error || log.log).call(log,
+      { event: 'title_enrichment_by_id_failed', titleId: title.id, vndbId, error: err.message },
+      `Failed to enrich title ${title.id} by VNDB ID ${vndbId}`
+    );
+    return title;
+  }
+}
+
+/**
+ * Enrich a Title from a Steam app.
+ *
+ * steamAppId is Game/release-owned, so it is written only to the designated
+ * storage Game (or an explicit `steamAppIdTarget`), never to Title.
+ */
+export async function enrichTitleBySteamId(
+  steamAppId, title, games, prisma, steamClient, coversPath, screenshotsPath, logger, options = {},
+) {
+  const log = logger || console;
+  try {
+    const details = await steamClient.getAppDetails(steamAppId);
+    if (!details) return markTitleUnmatched(title, games, prisma);
+
+    const data = mapSteamToTitleData(details);
+    const storageGame = pickMediaStorageGame(games);
+    const media = await downloadTitleMedia({
+      storageGame,
+      coversPath,
+      screenshotsPath,
+      coverUrl: SteamClient.getLibraryCapsuleUrl(steamAppId),
+      screenshotUrls: details.screenshots?.slice(0, 8)?.map((s) => s.path_full) || [],
+    });
+    if (!media.coverPath && storageGame && coversPath) {
+      const heroCapsuleUrl = SteamClient.getHeroCapsuleUrl(steamAppId);
+      const localCover = await downloadCover(heroCapsuleUrl, storageGame.id, coversPath);
+      if (!localCover && details.header_image) {
+        const headerCover = await downloadCover(details.header_image, storageGame.id, coversPath);
+        if (headerCover) media.coverPath = headerCover;
+      } else if (localCover) {
+        media.coverPath = localCover;
+      }
+    }
+    Object.assign(data, media);
+    data.metadataSource = 'auto';
+    data.metadataFetchedAt = new Date();
+
+    const targetGameId = options.steamAppIdTarget || storageGame?.id;
+    const extraGameData = targetGameId ? { [targetGameId]: { steamAppId: String(steamAppId) } } : {};
+
+    return prisma.$transaction((tx) => applyTitleLogicalWrite(tx, title.id, data, games, extraGameData));
+  } catch (err) {
+    (log.error || log.log).call(log,
+      { event: 'title_steam_enrichment_failed', titleId: title.id, steamAppId, error: err.message },
+      `Failed to enrich title ${title.id} from Steam app ${steamAppId}`
+    );
+    return title;
+  }
+}
+
+/**
+ * Batch-enrich Titles (not Games) that need logical metadata.
+ *
+ * One Title with N ArchiveItems/Games performs a single logical enrichment and
+ * one mirrored DB write. Freshness uses Title.metadataSource/metadataFetchedAt;
+ * manual Titles are skipped. Relation include avoids per-Title Game queries.
+ */
+export async function runBatchTitleEnrichment(prisma, vndbClient, coversPath, screenshotsPath, logger) {
+  const log = logger || console;
+
+  const ttlDays = parseInt(process.env.METADATA_TTL_DAYS, 10) || DEFAULT_TTL_DAYS;
+  const cutoffDate = new Date(Date.now() - ttlDays * 24 * 60 * 60 * 1000);
+
+  const titles = await prisma.title.findMany({
+    where: {
+      metadataSource: { not: 'manual' },
+      OR: [
+        { metadataFetchedAt: null },
+        { metadataSource: 'unmatched' },
+        { metadataFetchedAt: { lt: cutoffDate } },
+      ],
+    },
+    include: { archiveItems: { include: { game: true } } },
+  });
+
+  let enriched = 0;
+  let failed = 0;
+  let skipped = 0;
+
+  for (const title of titles) {
+    const games = title.archiveItems.map((item) => item.game).filter(Boolean);
+    if (games.length === 0) { skipped++; continue; }
+
+    try {
+      const updated = await enrichTitle(title, games, prisma, vndbClient, coversPath, screenshotsPath, log);
+      if (updated.metadataSource === 'auto') enriched++;
+      else skipped++;
+    } catch (err) {
+      (log.error || log.log).call(log,
+        { event: 'title_enrichment_batch_error', titleId: title.id, error: err.message },
+        `Batch enrichment error for title ${title.id}`
+      );
+      failed++;
+    }
+  }
+
+  return { enriched, failed, skipped };
+}
+
 // ── Steam Enrichment ────────────────────────────────────────
 
 /**

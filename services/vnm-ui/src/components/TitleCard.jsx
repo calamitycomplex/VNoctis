@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { generateGradient, formatRating, getRatingColor, truncate } from '../lib/utils';
-import { archiveItemsOf, displayTitleFor, pickCoverGame, singleGameFor } from '../lib/titleDisplay';
+import { archiveItemsOf, displayTitleFor, logicalMetadataFor, pickCoverGame, singleGameFor } from '../lib/titleDisplay';
 
 /**
  * Card for one logical Title.
@@ -16,6 +16,8 @@ export default function TitleCard({ title, onClick, onHide, onFavorite, isAdmin 
   const game = singleGameFor(title);
   const coverGame = pickCoverGame(title);
   const name = displayTitleFor(title);
+  // Title.metadata is authoritative; nested Game is a compatibility fallback.
+  const meta = logicalMetadataFor(title);
   const gradient = generateGradient(name);
 
   const coverUrl = coverGame?.coverPath
@@ -65,11 +67,11 @@ export default function TitleCard({ title, onClick, onHide, onFavorite, isAdmin 
         )}
 
         {/* Rating badge — display metadata from the compatibility Game */}
-        {game?.vndbRating != null && (
+        {meta.vndbRating != null && (
           <div
-            className={`absolute top-2 right-2 px-2 py-0.5 rounded-full text-xs font-bold text-white shadow ${getRatingColor(game.vndbRating)}`}
+            className={`absolute top-2 right-2 px-2 py-0.5 rounded-full text-xs font-bold text-white shadow ${getRatingColor(meta.vndbRating)}`}
           >
-            {formatRating(game.vndbRating)}
+            {formatRating(meta.vndbRating)}
           </div>
         )}
 
@@ -174,8 +176,8 @@ export default function TitleCard({ title, onClick, onHide, onFavorite, isAdmin 
         <h3 className="text-sm font-semibold text-gray-900 dark:text-white leading-tight line-clamp-2">
           {name}
         </h3>
-        {game?.developer && (
-          <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5 truncate">{game.developer}</p>
+        {meta.developer && (
+          <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5 truncate">{meta.developer}</p>
         )}
         {isMulti && (
           <p className="text-[11px] text-gray-500 dark:text-gray-400 mt-0.5">
@@ -192,10 +194,10 @@ export default function TitleCard({ title, onClick, onHide, onFavorite, isAdmin 
       </div>
 
       {/* Hover overlay with synopsis — single-release Game metadata only */}
-      {hovered && game?.synopsis && (
+      {hovered && meta.synopsis && (
         <div className="absolute inset-0 bg-black/80 flex flex-col justify-end p-4 rounded-lg transition-opacity duration-200">
           <h3 className="text-sm font-semibold text-white mb-2 line-clamp-2">{name}</h3>
-          <p className="text-xs text-gray-300 leading-relaxed line-clamp-4">{truncate(game.synopsis, 200)}</p>
+          <p className="text-xs text-gray-300 leading-relaxed line-clamp-4">{truncate(meta.synopsis, 200)}</p>
         </div>
       )}
     </div>

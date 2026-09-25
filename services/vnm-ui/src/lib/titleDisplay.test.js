@@ -5,6 +5,7 @@ import {
   displayTitleFor,
   hasRuntimeActions,
   isMultiRelease,
+  logicalMetadataFor,
   pickCoverGame,
   singleGameFor,
 } from './titleDisplay.js';
@@ -22,10 +23,16 @@ test('singleGameFor returns the only nested Game, and null for multi-release tit
   assert.equal(singleGameFor(title({ archiveItems: [] })), null);
 });
 
-test('displayTitleFor keeps VNDB-first precedence for a single release', () => {
+test('displayTitleFor prefers Title metadata, then Title name, then single-Game fallback', () => {
   const game = { id: 'g1', vndbTitle: 'VNDB Name', extractedTitle: 'Extracted' };
-  assert.equal(displayTitleFor(title({ archiveItems: [item({ game })] })), 'VNDB Name');
-  assert.equal(displayTitleFor(title({ archiveItems: [item({ game: { id: 'g1', extractedTitle: 'Extracted' } })] })), 'Title Name');
+  const meta = { vndbTitle: 'Metadata Name' };
+
+  // Title.metadata wins.
+  assert.equal(displayTitleFor(title({ metadata: meta, archiveItems: [item({ game })] })), 'Metadata Name');
+  // Title.name wins when metadata is absent.
+  assert.equal(displayTitleFor(title({ archiveItems: [item({ game })] })), 'Title Name');
+  // Single-Game fallbacks apply only when Title name is null.
+  assert.equal(displayTitleFor(title({ name: null, archiveItems: [item({ game })] })), 'VNDB Name');
   assert.equal(displayTitleFor(title({ name: null, archiveItems: [item({ game: { id: 'g1', extractedTitle: 'Extracted' } })] })), 'Extracted');
   assert.equal(displayTitleFor(title({ name: null, archiveItems: [item({ game: null })] })), 'Dir');
 });
@@ -34,6 +41,37 @@ test('displayTitleFor prefers the Title name for multi-release titles (no metada
   const t = title({ archiveItems: [item({ game: { id: 'g1', vndbTitle: 'First Game Name' } }), item({ id: 'item-2', game: { id: 'g2' } })] });
   assert.equal(displayTitleFor(t), 'Title Name');
   assert.equal(displayTitleFor(title({ name: null, archiveItems: [item({ game: null }), item({ id: 'item-2', game: null })] })), 'Dir');
+});
+
+test('displayTitleFor lets multi-release Title metadata lead without merging Games', () => {
+  const t = title({
+    metadata: { vndbTitle: 'Shared Metadata' },
+    archiveItems: [item({ game: { id: 'g1', vndbTitle: 'Game A' } }), item({ id: 'item-2', game: { id: 'g2', vndbTitle: 'Game B' } })],
+  });
+  assert.equal(displayTitleFor(t), 'Shared Metadata');
+});
+
+test('logicalMetadataFor prefers Title.metadata and falls back to the single Game', () => {
+  const game = { id: 'g1', vndbRating: 7, developer: 'Game Dev', synopsis: 'Game synopsis', tags: ['g'], screenshots: ['g.jpg'], coverPath: '/covers/g.jpg' };
+  const meta = { vndbRating: 9, developer: 'Title Dev', synopsis: 'Title synopsis', tags: ['t'], screenshots: ['t.jpg'], coverPath: '/covers/title.jpg' };
+
+  const withMeta = logicalMetadataFor(title({ metadata: meta, archiveItems: [item({ game })] }));
+  assert.equal(withMeta.vndbRating, 9);
+  assert.equal(withMeta.developer, 'Title Dev');
+  assert.equal(withMeta.synopsis, 'Title synopsis');
+  assert.deepEqual(withMeta.tags, ['t']);
+  assert.equal(withMeta.coverPath, '/covers/title.jpg');
+
+  const fallback = logicalMetadataFor(title({ archiveItems: [item({ game })] }));
+  assert.equal(fallback.vndbRating, 7);
+  assert.equal(fallback.developer, 'Game Dev');
+  assert.deepEqual(fallback.tags, ['g']);
+
+  // No implicit primary for multi-release: nested Games must not be merged in.
+  const multi = logicalMetadataFor(title({
+    archiveItems: [item({ game: { id: 'g1', developer: 'Game A' } }), item({ id: 'item-2', game: { id: 'g2', developer: 'Game B' } })],
+  }));
+  assert.equal(multi.developer, null);
 });
 
 test('pickCoverGame returns a Game only when exactly one item has a cover', () => {

@@ -28,11 +28,37 @@ export function singleGameFor(title) {
 export function displayTitleFor(title) {
   if (!title) return 'Unknown';
   const items = archiveItemsOf(title);
+  const metadataTitle = title.metadata?.vndbTitle;
   if (items.length === 1) {
     const game = items[0].game;
-    return game?.vndbTitle || title.name || game?.extractedTitle || items[0].directoryName || 'Unknown';
+    return metadataTitle || title.name || game?.vndbTitle || game?.extractedTitle || items[0].directoryName || 'Unknown';
   }
-  return title.name || items[0]?.directoryName || 'Unknown';
+  return metadataTitle || title.name || items[0]?.directoryName || 'Unknown';
+}
+
+/**
+ * Logical metadata for display: Title.metadata is authoritative, with the
+ * single compatibility Game used only as a fallback during the compatibility
+ * period. Multi-release Titles never borrow a nested Game (no implicit primary).
+ */
+export function logicalMetadataFor(title) {
+  const meta = title?.metadata ?? {};
+  const game = singleGameFor(title);
+  const pick = (field) => meta[field] ?? game?.[field] ?? null;
+  return {
+    vndbId: pick('vndbId'),
+    vndbTitle: pick('vndbTitle'),
+    vndbTitleOriginal: pick('vndbTitleOriginal'),
+    synopsis: pick('synopsis'),
+    developer: pick('developer'),
+    releaseDate: pick('releaseDate'),
+    lengthMinutes: pick('lengthMinutes'),
+    vndbRating: pick('vndbRating'),
+    metadataSource: pick('metadataSource'),
+    tags: meta.tags ?? game?.tags ?? [],
+    screenshots: meta.screenshots ?? game?.screenshots ?? [],
+    coverPath: meta.coverPath ?? game?.coverPath ?? null,
+  };
 }
 
 /**

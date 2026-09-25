@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import api from '../hooks/useApi';
 import { generateGradient, getBuildStatusBadge } from '../lib/utils';
-import { archiveItemsOf, displayTitleFor, isMultiRelease } from '../lib/titleDisplay';
+import { archiveItemsOf, displayTitleFor, isMultiRelease, logicalMetadataFor } from '../lib/titleDisplay';
 
 /**
  * Title detail modal for Titles that should not open a single Game detail
@@ -56,6 +56,8 @@ export default function TitleDetailModal({ title: initialTitle, onClose, onOpenG
   const items = archiveItemsOf(title);
   const name = displayTitleFor(title);
   const multi = isMultiRelease(title);
+  // Title.metadata is authoritative; nested Game is a compatibility fallback.
+  const meta = logicalMetadataFor(title);
   const gradient = generateGradient(name);
 
   return (
@@ -109,6 +111,9 @@ export default function TitleDetailModal({ title: initialTitle, onClose, onOpenG
                   <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
                     {multi ? `${items.length} archive sources` : '1 archive source'}
                   </p>
+                  {meta.developer && (
+                    <p className="text-sm text-gray-500 dark:text-gray-400 mt-0.5 truncate">{meta.developer}</p>
+                  )}
                 </div>
                 <span className={`flex-shrink-0 px-3 py-1.5 rounded-lg text-sm font-semibold ${
                   title.sourceAvailable === false
@@ -123,6 +128,10 @@ export default function TitleDetailModal({ title: initialTitle, onClose, onOpenG
                 <p className="text-xs text-gray-500 dark:text-gray-400 mb-4">
                   This title has multiple releases. Runtime actions are per-release — choose a source below.
                 </p>
+              )}
+
+              {meta.synopsis && (
+                <p className="text-sm text-gray-600 dark:text-gray-300 mb-4 line-clamp-4">{meta.synopsis}</p>
               )}
 
               <h3 className="text-sm font-bold uppercase tracking-wider text-gray-500 dark:text-gray-400 mb-2">

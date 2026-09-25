@@ -1,4 +1,14 @@
-import { enrichGame, enrichGameById, enrichGameBySteamId } from '../services/enrichment.js';
+import {
+  enrichGame,
+  enrichGameById,
+  enrichGameBySteamId,
+  enrichTitle,
+  enrichTitleById,
+  enrichTitleBySteamId,
+} from '../services/enrichment.js';
+
+/** Title IDs are UUIDs, unlike the legacy 32-character Game fingerprint. */
+const TITLE_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * Metadata refresh route plugin.
@@ -120,18 +130,15 @@ export default async function metadataRoutes(fastify) {
    *
    * Re-fetches metadata for a game from VNDB or Steam.
    *
+   * When the Game is mapped to a Title, the refresh runs against that Title
+   * (Title becomes authoritative) and mirrors logical fields to every nested
+   * Game. Unmapped legacy Games keep the original Game-only behavior.
+   *
    * Optional body:
    *   { vndbId: "v12345" }    - Force-link to a VNDB entry.
    *   { steamAppId: "12345" } - Force-link to a Steam app.
    *
-   * Smart source resolution when body is empty (e.g. "Refresh Metadata" button):
-   *   1. body.steamAppId → enrich from Steam
-   *   2. body.vndbId     → enrich from VNDB
-   *   3. game.steamAppId → re-fetch from Steam
-   *   4. game.vndbId     → re-fetch from VNDB
-   *   5. none            → search VNDB by extracted title (legacy fallback)
-   *
-   * Returns the updated game object.
+   * Returns the updated game object (backward compatible).
    */
   fastify.post('/metadata/:gameId/refresh', async (request, reply) => {
     const { gameId } = request.params;
@@ -143,9 +150,10 @@ export default async function metadataRoutes(fastify) {
       });
     }
 
-    // Verify game exists
+    // Verify game exists and resolve its Title mapping when present.
     const game = await fastify.prisma.game.findUnique({
       where: { id: gameId },
+      include: { archiveItem: { include: { title: true } } },
     });
 
     if (!game) {
@@ -162,38 +170,91 @@ export default async function metadataRoutes(fastify) {
 
     try {
       const body = request.body || {};
+      const mappedTitle = game.archiveItem?.title ?? null;
+
+      // ── Title-authoritative bridge ─────────────────────
+      if (mappedTitle) {
+        const games = await fastify.prisma.game.findMany({
+          where: { archiveItem: { titleId: mappedTitle.id } },
+          select: { id: true, sourceAvailable: true },
+        });
+
+        if (body.steamAppId) {
+          if (!/^\d+$/.test(String(body.steamAppId))) {
+            return reply.code(400).send({
+              code: 'INVALID_STEAM_APP_ID',
+              message: 'steamAppId must be a numeric value.',
+            });
+          }
+          if (!steamClient) {
+            return reply.code(503).send({
+              code: 'STEAM_CLIENT_UNAVAILABLE',
+              message: 'Steam client is not configured.',
+            });
+          }
+          await enrichTitleBySteamId(
+            body.steamAppId, mappedTitle, games, fastify.prisma, steamClient,
+            coversPath, screenshotsPath, request.log, { steamAppIdTarget: gameId },
+          );
+        } else if (body.vndbId) {
+          if (!vndbClient) {
+            return reply.code(503).send({
+              code: 'VNDB_CLIENT_UNAVAILABLE',
+              message: 'VNDB client is not configured.',
+            });
+          }
+          await enrichTitleById(
+            body.vndbId, mappedTitle, games, fastify.prisma, vndbClient,
+            coversPath, screenshotsPath, request.log,
+          );
+        } else if (game.steamAppId && steamClient) {
+          await enrichTitleBySteamId(
+            game.steamAppId, mappedTitle, games, fastify.prisma, steamClient,
+            coversPath, screenshotsPath, request.log, { steamAppIdTarget: gameId },
+          );
+        } else if (mappedTitle.vndbId && vndbClient) {
+          await enrichTitleById(
+            mappedTitle.vndbId, mappedTitle, games, fastify.prisma, vndbClient,
+            coversPath, screenshotsPath, request.log,
+          );
+        } else {
+          if (!vndbClient) {
+            return reply.code(503).send({
+              code: 'VNDB_CLIENT_UNAVAILABLE',
+              message: 'VNDB client is not configured.',
+            });
+          }
+          await enrichTitle(
+            mappedTitle, games, fastify.prisma, vndbClient,
+            coversPath, screenshotsPath, request.log,
+          );
+        }
+
+        return await fastify.prisma.game.findUnique({ where: { id: gameId } });
+      }
+
+      // ── Unmapped legacy Game fallback (original behavior) ──
       let updated;
 
-      // ── Priority 1: explicit steamAppId in body ────────
       if (body.steamAppId) {
-        // Validate: must be numeric string
         if (!/^\d+$/.test(String(body.steamAppId))) {
           return reply.code(400).send({
             code: 'INVALID_STEAM_APP_ID',
             message: 'steamAppId must be a numeric value.',
           });
         }
-
         if (!steamClient) {
           return reply.code(503).send({
             code: 'STEAM_CLIENT_UNAVAILABLE',
             message: 'Steam client is not configured.',
           });
         }
-
         updated = await enrichGameBySteamId(
-          body.steamAppId,
-          game,
-          fastify.prisma,
-          steamClient,
-          coversPath,
-          screenshotsPath,
-          request.log
+          body.steamAppId, game, fastify.prisma, steamClient, coversPath, screenshotsPath, request.log,
         );
         return updated;
       }
 
-      // ── Priority 2: explicit vndbId in body ────────────
       if (body.vndbId) {
         if (!vndbClient) {
           return reply.code(503).send({
@@ -201,48 +262,26 @@ export default async function metadataRoutes(fastify) {
             message: 'VNDB client is not configured.',
           });
         }
-
         updated = await enrichGameById(
-          body.vndbId,
-          game,
-          fastify.prisma,
-          vndbClient,
-          coversPath,
-          screenshotsPath,
-          request.log
+          body.vndbId, game, fastify.prisma, vndbClient, coversPath, screenshotsPath, request.log,
         );
         return updated;
       }
 
-      // ── Priority 3: no body — smart source resolution ──
-      // Check stored steamAppId first, then vndbId
       if (game.steamAppId && steamClient) {
         updated = await enrichGameBySteamId(
-          game.steamAppId,
-          game,
-          fastify.prisma,
-          steamClient,
-          coversPath,
-          screenshotsPath,
-          request.log
+          game.steamAppId, game, fastify.prisma, steamClient, coversPath, screenshotsPath, request.log,
         );
         return updated;
       }
 
       if (game.vndbId && vndbClient) {
         updated = await enrichGameById(
-          game.vndbId,
-          game,
-          fastify.prisma,
-          vndbClient,
-          coversPath,
-          screenshotsPath,
-          request.log
+          game.vndbId, game, fastify.prisma, vndbClient, coversPath, screenshotsPath, request.log,
         );
         return updated;
       }
 
-      // ── Priority 4: no IDs stored — search VNDB by title
       if (!vndbClient) {
         return reply.code(503).send({
           code: 'VNDB_CLIENT_UNAVAILABLE',
@@ -251,12 +290,7 @@ export default async function metadataRoutes(fastify) {
       }
 
       updated = await enrichGame(
-        game,
-        fastify.prisma,
-        vndbClient,
-        coversPath,
-        screenshotsPath,
-        request.log
+        game, fastify.prisma, vndbClient, coversPath, screenshotsPath, request.log,
       );
       return updated;
     } catch (err) {
@@ -264,6 +298,96 @@ export default async function metadataRoutes(fastify) {
       return reply.code(500).send({
         code: 'ENRICHMENT_ERROR',
         message: err.message || 'Metadata refresh failed.',
+      });
+    }
+  });
+
+  /**
+   * POST /metadata/titles/:titleId/refresh
+   *
+   * Title-authoritative refresh. UUID identity; writes logical metadata to the
+   * Title and mirrors it to every nested compatibility Game.
+   *
+   * Body: { vndbId } or { steamAppId } to force-link; empty to resolve from the
+   * stored Title.vndbId or search VNDB by the Title name.
+   */
+  fastify.post('/metadata/titles/:titleId/refresh', async (request, reply) => {
+    const { titleId } = request.params;
+
+    if (!TITLE_UUID.test(titleId)) {
+      return reply.code(400).send({
+        error: { code: 'INVALID_TITLE_ID', message: 'titleId must be a UUID.' },
+      });
+    }
+
+    const title = await fastify.prisma.title.findUnique({ where: { id: titleId } });
+    if (!title) {
+      return reply.code(404).send({
+        error: { code: 'TITLE_NOT_FOUND', message: `Title with id "${titleId}" not found.` },
+      });
+    }
+
+    const vndbClient = fastify.vndbClient;
+    const steamClient = fastify.steamClient;
+    const coversPath = fastify.coversPath;
+    const screenshotsPath = fastify.screenshotsPath;
+
+    try {
+      const body = request.body || {};
+      const games = await fastify.prisma.game.findMany({
+        where: { archiveItem: { titleId } },
+        select: { id: true, sourceAvailable: true },
+      });
+
+      if (body.steamAppId) {
+        if (!/^\d+$/.test(String(body.steamAppId))) {
+          return reply.code(400).send({
+            error: { code: 'INVALID_STEAM_APP_ID', message: 'steamAppId must be a numeric value.' },
+          });
+        }
+        if (!steamClient) {
+          return reply.code(503).send({
+            error: { code: 'STEAM_CLIENT_UNAVAILABLE', message: 'Steam client is not configured.' },
+          });
+        }
+        return await enrichTitleBySteamId(
+          body.steamAppId, title, games, fastify.prisma, steamClient,
+          coversPath, screenshotsPath, request.log,
+        );
+      }
+
+      if (body.vndbId) {
+        if (!vndbClient) {
+          return reply.code(503).send({
+            error: { code: 'VNDB_CLIENT_UNAVAILABLE', message: 'VNDB client is not configured.' },
+          });
+        }
+        return await enrichTitleById(
+          body.vndbId, title, games, fastify.prisma, vndbClient,
+          coversPath, screenshotsPath, request.log,
+        );
+      }
+
+      if (title.vndbId && vndbClient) {
+        return await enrichTitleById(
+          title.vndbId, title, games, fastify.prisma, vndbClient,
+          coversPath, screenshotsPath, request.log,
+        );
+      }
+
+      if (!vndbClient) {
+        return reply.code(503).send({
+          error: { code: 'VNDB_CLIENT_UNAVAILABLE', message: 'VNDB client is not configured.' },
+        });
+      }
+
+      return await enrichTitle(
+        title, games, fastify.prisma, vndbClient, coversPath, screenshotsPath, request.log,
+      );
+    } catch (err) {
+      request.log.error({ err: err.message, titleId }, 'Title metadata refresh failed');
+      return reply.code(500).send({
+        error: { code: 'ENRICHMENT_ERROR', message: err.message || 'Title metadata refresh failed.' },
       });
     }
   });

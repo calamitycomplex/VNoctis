@@ -1,7 +1,12 @@
 import { rm, readdir, access } from 'node:fs/promises';
 import { join } from 'node:path';
 import { scanGamesDirectory } from '../services/scanner.js';
-import { runBatchEnrichment } from '../services/enrichment.js';
+import {
+  runBatchTitleEnrichment,
+  applyTitleLogicalWrite,
+  pickMediaStorageGame,
+  TITLE_LOGICAL_FIELDS,
+} from '../services/enrichment.js';
 import { downloadCover } from '../services/coverDownloader.js';
 import { removeScreenshots } from '../services/screenshotDownloader.js';
 import {
@@ -56,6 +61,22 @@ const VALID_BUILD_STATUSES = ['not_built', 'queued', 'building', 'built', 'faile
 
 /** Valid metadata source values */
 const VALID_METADATA_SOURCES = ['auto', 'manual', 'unmatched'];
+
+/** Title logical fields editable through PATCH /library/titles/:titleId. */
+const TITLE_EDITABLE_FIELDS = [
+  'name',
+  'vndbId',
+  'vndbTitle',
+  'vndbTitleOriginal',
+  'synopsis',
+  'developer',
+  'releaseDate',
+  'lengthMinutes',
+  'vndbRating',
+  'tags',
+  'screenshots',
+  'coverPath',
+];
 
 /**
  * Library CRUD route plugin.
@@ -244,6 +265,83 @@ export default async function libraryRoutes(fastify) {
   });
 
   /**
+   * PATCH /library/titles/:titleId
+   * Manual logical-metadata edit on the authoritative Title. Sets
+   * Title.metadataSource='manual' and mirrors compatible logical fields to every
+   * nested compatibility Game. Title.name has no Game equivalent and stays
+   * Title-only; Game.extractedTitle is never touched.
+   */
+  fastify.patch('/library/titles/:titleId', async (request, reply) => {
+    const { titleId } = request.params;
+
+    if (!TITLE_UUID.test(titleId)) {
+      return reply.code(400).send({
+        error: { code: 'INVALID_TITLE_ID', message: 'titleId must be a UUID.' },
+      });
+    }
+
+    const title = await fastify.prisma.title.findUnique({ where: { id: titleId }, select: { id: true } });
+    if (!title) {
+      return reply.code(404).send({
+        error: { code: 'TITLE_NOT_FOUND', message: `Title with id "${titleId}" not found.` },
+      });
+    }
+
+    const body = request.body;
+    if (!body || typeof body !== 'object' || Object.keys(body).length === 0) {
+      return reply.code(400).send({ error: { code: 'EMPTY_BODY', message: 'Request body must include at least one field.' } });
+    }
+
+    const updateData = {};
+    for (const field of TITLE_EDITABLE_FIELDS) {
+      if (!(field in body)) continue;
+      let value = body[field];
+      if ((field === 'tags' || field === 'screenshots') && Array.isArray(value)) value = JSON.stringify(value);
+      if (field === 'releaseDate' && value !== null) value = new Date(value);
+      updateData[field] = value;
+    }
+
+    if (Object.keys(updateData).length === 0) {
+      return reply.code(400).send({
+        error: { code: 'NO_VALID_FIELDS', message: `Allowed fields: ${TITLE_EDITABLE_FIELDS.join(', ')}` },
+      });
+    }
+
+    const games = await fastify.prisma.game.findMany({
+      where: { archiveItem: { titleId } },
+      select: { id: true, sourceAvailable: true },
+    });
+
+    // Optional remote cover: download once through the temporary media-storage
+    // adapter Game, then mirror the resulting logical path.
+    if (updateData.coverPath && /^https?:\/\//.test(updateData.coverPath)) {
+      const storageGame = pickMediaStorageGame(games);
+      if (storageGame) {
+        const coversPath = fastify.coversPath || '/covers';
+        try {
+          const existing = await readdir(coversPath);
+          for (const file of existing) {
+            if (file.startsWith(storageGame.id)) await rm(join(coversPath, file), { force: true });
+          }
+        } catch { /* covers dir may not exist yet */ }
+
+        const localPath = await downloadCover(updateData.coverPath, storageGame.id, coversPath);
+        if (localPath) updateData.coverPath = localPath;
+        else return reply.code(400).send({
+          error: { code: 'COVER_DOWNLOAD_FAILED', message: 'Failed to download the cover image from the provided URL.' },
+        });
+      }
+    }
+
+    updateData.metadataSource = 'manual';
+    await fastify.prisma.$transaction((tx) => applyTitleLogicalWrite(tx, titleId, updateData, games));
+
+    const full = await fastify.prisma.title.findUnique({ where: { id: titleId }, select: TITLE_SELECT });
+    const favoriteGameIds = await loadFavoriteGameIds(fastify.prisma, request.user?.userId, [full]);
+    return serializeTitle(full, favoriteGameIds);
+  });
+
+  /**
    * POST /library/unhide-all
    * Bulk unhide all hidden games.
    */
@@ -352,6 +450,7 @@ export default async function libraryRoutes(fastify) {
 
     const game = await fastify.prisma.game.findUnique({
       where: { id: gameId },
+      include: { archiveItem: { include: { title: true } } },
     });
 
     if (!game) {
@@ -440,7 +539,37 @@ export default async function libraryRoutes(fastify) {
       }
     }
 
-    // Mark as manually edited (but not for hide-only toggles)
+    // When the Game is mapped to a Title, Title is authoritative for logical
+    // metadata: write Title and mirror to every sibling Game in one transaction.
+    const mappedTitle = game.archiveItem?.title ?? null;
+    if (mappedTitle) {
+      const logicalUpdate = {};
+      const gameUpdate = {};
+      for (const key of Object.keys(updateData)) {
+        if (TITLE_LOGICAL_FIELDS.includes(key)) logicalUpdate[key] = updateData[key];
+        else gameUpdate[key] = updateData[key];
+      }
+
+      const hasLogical = Object.keys(logicalUpdate).length > 0;
+      if (hasLogical) logicalUpdate.metadataSource = 'manual';
+
+      const titleGames = await fastify.prisma.game.findMany({
+        where: { archiveItem: { titleId: mappedTitle.id } },
+        select: { id: true },
+      });
+
+      await fastify.prisma.$transaction(async (tx) => {
+        if (hasLogical) await applyTitleLogicalWrite(tx, mappedTitle.id, logicalUpdate, titleGames);
+        if (Object.keys(gameUpdate).length > 0) {
+          await tx.game.update({ where: { id: gameId }, data: gameUpdate });
+        }
+      });
+
+      const bridged = await fastify.prisma.game.findUnique({ where: { id: gameId } });
+      return parseGameJsonFields(bridged);
+    }
+
+    // Unmapped legacy Game: preserve the original Game-only behavior.
     const nonHiddenFields = Object.keys(updateData).filter(k => k !== 'hidden');
     if (nonHiddenFields.length > 0) {
       updateData.metadataSource = 'manual';
@@ -637,7 +766,7 @@ async function runScanAsync(jobId, gamesPath, prisma, vndbClient, coversPath, sc
     if (vndbClient && coversPath) {
       logger.info('Starting post-scan batch VNDB enrichment');
       try {
-        const enrichResult = await runBatchEnrichment(prisma, vndbClient, coversPath, screenshotsPath, logger);
+        const enrichResult = await runBatchTitleEnrichment(prisma, vndbClient, coversPath, screenshotsPath, logger);
         logger.info(
           {
             enriched: enrichResult.enriched,

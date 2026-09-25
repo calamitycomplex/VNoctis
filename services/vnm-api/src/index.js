@@ -24,7 +24,7 @@ import publishRoutes from './routes/publish.js';
 import { scanGamesDirectory } from './services/scanner.js';
 import { VNDBClient } from './services/vndbClient.js';
 import { SteamClient } from './services/steamClient.js';
-import { runBatchEnrichment } from './services/enrichment.js';
+import { runBatchTitleEnrichment } from './services/enrichment.js';
 import { checkStaleBuilds } from './services/buildOrchestrator.js';
 import { DirectoryWatcher } from './services/watcher.js';
 import { deployMigrations, ensureGamePublishColumns } from './services/migrationCompat.js';
@@ -555,7 +555,7 @@ const start = async () => {
 
         // After scan, trigger batch enrichment in the background
         fastify.log.info('Starting batch VNDB enrichment');
-        return runBatchEnrichment(prisma, vndbClient, coversPath, screenshotsPath, fastify.log);
+        return runBatchTitleEnrichment(prisma, vndbClient, coversPath, screenshotsPath, fastify.log);
       })
       .then((enrichResult) => {
         fastify.log.info(
@@ -588,7 +588,7 @@ const start = async () => {
                 'Watcher-triggered rescan completed'
               );
 
-              const enrichResult = await runBatchEnrichment(prisma, vndbClient, coversPath, screenshotsPath, fastify.log);
+              const enrichResult = await runBatchTitleEnrichment(prisma, vndbClient, coversPath, screenshotsPath, fastify.log);
               fastify.log.info(
                 { enriched: enrichResult.enriched, failed: enrichResult.failed, skipped: enrichResult.skipped },
                 'Watcher-triggered enrichment completed'

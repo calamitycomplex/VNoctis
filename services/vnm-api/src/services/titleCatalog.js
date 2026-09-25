@@ -36,6 +36,25 @@ const GAME_SELECT = {
   screenshots: true,
 };
 
+/** Authoritative logical-metadata fields owned by Title. */
+export const TITLE_METADATA_FIELDS = [
+  'vndbId',
+  'vndbTitle',
+  'vndbTitleOriginal',
+  'synopsis',
+  'developer',
+  'releaseDate',
+  'lengthMinutes',
+  'vndbRating',
+  'coverPath',
+  'tags',
+  'screenshots',
+  'metadataSource',
+  'metadataFetchedAt',
+];
+
+const TITLE_METADATA_SELECT = Object.fromEntries(TITLE_METADATA_FIELDS.map((field) => [field, true]));
+
 /**
  * Prisma select for a Title read. Uses relation select so Prisma batches the
  * ArchiveItem/Game reads instead of issuing one query per Title row.
@@ -45,6 +64,7 @@ export const TITLE_SELECT = {
   name: true,
   createdAt: true,
   updatedAt: true,
+  ...TITLE_METADATA_SELECT,
   archiveItems: {
     select: {
       id: true,
@@ -104,7 +124,32 @@ export function serializeTitle(title, favoriteGameIds) {
     createdAt: title.createdAt,
     updatedAt: title.updatedAt,
     sourceAvailable: archiveItems.some((item) => item.sourceAvailable),
+    metadata: serializeTitleMetadata(title),
     archiveItems,
+  };
+}
+
+/**
+ * Serialize the authoritative Title logical metadata.
+ *
+ * Malformed tags/screenshots JSON fails safe to an empty array, matching the
+ * established legacy library behavior, so one bad row cannot 500 the list.
+ */
+export function serializeTitleMetadata(title) {
+  return {
+    vndbId: title.vndbId ?? null,
+    vndbTitle: title.vndbTitle ?? null,
+    vndbTitleOriginal: title.vndbTitleOriginal ?? null,
+    synopsis: title.synopsis ?? null,
+    developer: title.developer ?? null,
+    releaseDate: title.releaseDate ?? null,
+    lengthMinutes: title.lengthMinutes ?? null,
+    vndbRating: title.vndbRating ?? null,
+    coverPath: title.coverPath ?? null,
+    tags: safeJsonParse(title.tags, []),
+    screenshots: safeJsonParse(title.screenshots, []),
+    metadataSource: title.metadataSource ?? 'unmatched',
+    metadataFetchedAt: title.metadataFetchedAt ?? null,
   };
 }
 
