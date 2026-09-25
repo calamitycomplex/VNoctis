@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { access, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
   extractArchiveToStaging,
   getSingleTopLevelFolderFromMembers,
+  inspectArchiveMembers,
   isSafeMemberName,
   parse7zMemberList,
   parseTarMemberList,
@@ -31,6 +32,16 @@ const zipListing = (entries) =>
 
 const zipEntry = (name, date = '24-Jan-01 12:00') =>
   `-rw-r--r--  3.0 unx  10  bx defN ${date} ${name}`;
+
+// zipinfo flags a symlink with `lrwxrwxrwx` but does not print `-> target`.
+const zipSymlinkEntry = (name, date = '24-Jan-01 12:00') =>
+  `lrwxrwxrwx  3.0 unx   0  bx defN ${date} ${name}`;
+
+async function seedSymlinkTarget(dir, memberName, content) {
+  const p = join(dir, memberName);
+  await mkdir(dirname(p), { recursive: true });
+  await writeFile(p, content);
+}
 
 async function fixture(t) {
   const root = await mkdtemp(join(tmpdir(), 'vnoctis-import-'));
@@ -128,6 +139,267 @@ test('parsers classify symlinks and hardlinks', () => {
   assert.equal(sevenZip[1].name, 'MyGame');
   assert.equal(sevenZip[2].linkKind, 'symlink');
   assert.equal(sevenZip[2].linkTarget, '../outside');
+});
+
+test('parseZipMemberList flags a symlink from Unix mode even without a printed target', () => {
+  const members = parseZipMemberList(
+    zipListing([
+      zipEntry('MyGame/'),
+      zipEntry('MyGame/game/script.rpy'),
+      zipSymlinkEntry('MyGame/game/link'),
+    ])
+  );
+
+  assert.equal(members.length, 3);
+  assert.equal(members[2].name, 'MyGame/game/link');
+  assert.equal(members[2].linkKind, 'symlink');
+  assert.equal(members[2].linkTarget, null);
+});
+
+test('inspectArchiveMembers reads ZIP symlink targets without extracting', async (t) => {
+  const { root, contentsDir } = await fixture(t);
+  const targetsDir = join(root, 'symlink-targets');
+  await seedSymlinkTarget(targetsDir, 'MyGame/game/link', '../images');
+
+  const listing = zipListing([
+    zipEntry('MyGame/game/script.rpy'),
+    zipSymlinkEntry('MyGame/game/link'),
+  ]);
+  const tools = await installFakeArchiveTools({ listing, contentsDir, symlinkTargetsDir: targetsDir });
+  t.after(() => tools.restore());
+
+  const archivePath = join(root, 'sample.zip');
+  await writeFile(archivePath, 'ARCHIVE');
+
+  const members = await inspectArchiveMembers({ archivePath, type: 'zip' });
+  assert.equal(members[1].linkKind, 'symlink');
+  assert.equal(members[1].linkTarget, '../images');
+});
+
+test('escaping relative ZIP symlink target is rejected before extraction', async (t) => {
+  const { root, gamesPath, stagingRoot } = await fixture(t);
+  const targetsDir = join(root, 'symlink-targets');
+  await seedSymlinkTarget(targetsDir, 'MyGame/game/link', '../../../outside');
+
+  const listing = zipListing([
+    zipEntry('MyGame/'),
+    zipEntry('MyGame/game/script.rpy'),
+    zipSymlinkEntry('MyGame/game/link'),
+  ]);
+  // contentsDir points at a non-existent directory: if the extractor were
+  // invoked it would fail with a command error, not an UNSAFE_ARCHIVE code.
+  const tools = await installFakeArchiveTools({
+    listing,
+    contentsDir: join(root, 'does-not-exist'),
+    symlinkTargetsDir: targetsDir,
+  });
+  t.after(() => tools.restore());
+
+  const archivePath = join(root, 'sample.zip');
+  await writeFile(archivePath, 'ARCHIVE');
+
+  let error;
+  try {
+    await extractArchiveToStaging({
+      archivePath,
+      originalName: 'sample.zip',
+      type: 'zip',
+      stagingRoot,
+      logger: silentLogger,
+    });
+  } catch (err) {
+    error = err;
+  }
+
+  assert.ok(error, 'expected rejection');
+  assert.equal(error.code, 'UNSAFE_ARCHIVE');
+  assert.equal(error.statusCode, 400);
+  assert.match(error.message, /Unsafe symlink/);
+  assert.deepEqual(await readdir(gamesPath), []);
+  assert.deepEqual(await readdir(stagingRoot).catch(() => []), []);
+});
+
+test('absolute ZIP symlink target is read pre-extraction and rejected', async (t) => {
+  const { root, gamesPath, stagingRoot } = await fixture(t);
+  const targetsDir = join(root, 'symlink-targets');
+  await seedSymlinkTarget(targetsDir, 'MyGame/game/link', '/etc/passwd');
+
+  const listing = zipListing([
+    zipEntry('MyGame/'),
+    zipEntry('MyGame/game/script.rpy'),
+    zipSymlinkEntry('MyGame/game/link'),
+  ]);
+  const tools = await installFakeArchiveTools({
+    listing,
+    contentsDir: join(root, 'does-not-exist'),
+    symlinkTargetsDir: targetsDir,
+  });
+  t.after(() => tools.restore());
+
+  const archivePath = join(root, 'sample.zip');
+  await writeFile(archivePath, 'ARCHIVE');
+
+  await assert.rejects(
+    () =>
+      extractArchiveToStaging({
+        archivePath,
+        originalName: 'sample.zip',
+        type: 'zip',
+        stagingRoot,
+        logger: silentLogger,
+      }),
+    (err) => {
+      assert.equal(err.code, 'UNSAFE_ARCHIVE');
+      assert.equal(err.statusCode, 400);
+      return true;
+    }
+  );
+
+  assert.deepEqual(await readdir(gamesPath), []);
+  assert.deepEqual(await readdir(stagingRoot).catch(() => []), []);
+});
+
+test('contained relative ZIP symlink target passes preflight and import succeeds', async (t) => {
+  const { root, gamesPath, stagingRoot, contentsDir } = await fixture(t);
+  await mkdir(join(contentsDir, 'MyGame', 'game'), { recursive: true });
+  await writeFile(join(contentsDir, 'MyGame', 'game', 'script.rpy'), 'label start:');
+
+  const targetsDir = join(root, 'symlink-targets');
+  await seedSymlinkTarget(targetsDir, 'MyGame/game/link', 'script.rpy');
+
+  const listing = zipListing([
+    zipEntry('MyGame/'),
+    zipEntry('MyGame/game/script.rpy'),
+    zipSymlinkEntry('MyGame/game/link'),
+  ]);
+  const tools = await installFakeArchiveTools({ listing, contentsDir, symlinkTargetsDir: targetsDir });
+  t.after(() => tools.restore());
+
+  const archivePath = join(root, 'sample.zip');
+  await writeFile(archivePath, 'ARCHIVE');
+
+  const result = await extractArchiveToStaging({
+    archivePath,
+    originalName: 'sample.zip',
+    type: 'zip',
+    stagingRoot,
+    logger: silentLogger,
+  });
+
+  assert.equal(result.folderName, 'MyGame');
+  assert.equal(await exists(join(result.path, 'game', 'script.rpy')), true);
+  assert.deepEqual(await readdir(stagingRoot), [result.stagingId]);
+  assert.deepEqual(await readdir(gamesPath), []);
+});
+
+test('NUL-containing ZIP symlink target fails safely before extraction', async (t) => {
+  const { root, gamesPath, stagingRoot } = await fixture(t);
+  const targetsDir = join(root, 'symlink-targets');
+  await seedSymlinkTarget(targetsDir, 'MyGame/game/link', Buffer.from([0x2e, 0x2e, 0x00, 0x78]));
+
+  const listing = zipListing([
+    zipEntry('MyGame/'),
+    zipEntry('MyGame/game/script.rpy'),
+    zipSymlinkEntry('MyGame/game/link'),
+  ]);
+  const tools = await installFakeArchiveTools({
+    listing,
+    contentsDir: join(root, 'does-not-exist'),
+    symlinkTargetsDir: targetsDir,
+  });
+  t.after(() => tools.restore());
+
+  const archivePath = join(root, 'sample.zip');
+  await writeFile(archivePath, 'ARCHIVE');
+
+  await assert.rejects(
+    () =>
+      extractArchiveToStaging({
+        archivePath,
+        originalName: 'sample.zip',
+        type: 'zip',
+        stagingRoot,
+        logger: silentLogger,
+      }),
+    (err) => {
+      assert.equal(err.code, 'ARCHIVE_INSPECTION_FAILED');
+      return true;
+    }
+  );
+
+  assert.deepEqual(await readdir(gamesPath), []);
+  assert.deepEqual(await readdir(stagingRoot).catch(() => []), []);
+});
+
+test('oversized ZIP symlink target fails safely before extraction', async (t) => {
+  const { root, gamesPath, stagingRoot } = await fixture(t);
+  const targetsDir = join(root, 'symlink-targets');
+  await seedSymlinkTarget(targetsDir, 'MyGame/game/link', 'a'.repeat(5000));
+
+  const listing = zipListing([
+    zipEntry('MyGame/'),
+    zipEntry('MyGame/game/script.rpy'),
+    zipSymlinkEntry('MyGame/game/link'),
+  ]);
+  const tools = await installFakeArchiveTools({
+    listing,
+    contentsDir: join(root, 'does-not-exist'),
+    symlinkTargetsDir: targetsDir,
+  });
+  t.after(() => tools.restore());
+
+  const archivePath = join(root, 'sample.zip');
+  await writeFile(archivePath, 'ARCHIVE');
+
+  await assert.rejects(
+    () =>
+      extractArchiveToStaging({
+        archivePath,
+        originalName: 'sample.zip',
+        type: 'zip',
+        stagingRoot,
+        logger: silentLogger,
+      }),
+    (err) => {
+      assert.equal(err.code, 'ARCHIVE_INSPECTION_FAILED');
+      return true;
+    }
+  );
+
+  assert.deepEqual(await readdir(gamesPath), []);
+  assert.deepEqual(await readdir(stagingRoot).catch(() => []), []);
+});
+
+test('absolute-path ZIP member names are still rejected before extraction', async (t) => {
+  const { root, gamesPath, stagingRoot } = await fixture(t);
+  const listing = zipListing([zipEntry('/abs.txt'), zipEntry('ok.txt')]);
+  const tools = await installFakeArchiveTools({
+    listing,
+    contentsDir: join(root, 'does-not-exist'),
+  });
+  t.after(() => tools.restore());
+
+  const archivePath = join(root, 'sample.zip');
+  await writeFile(archivePath, 'ARCHIVE');
+
+  await assert.rejects(
+    () =>
+      extractArchiveToStaging({
+        archivePath,
+        originalName: 'sample.zip',
+        type: 'zip',
+        stagingRoot,
+        logger: silentLogger,
+      }),
+    (err) => {
+      assert.equal(err.code, 'UNSAFE_ARCHIVE');
+      assert.equal(err.statusCode, 400);
+      return true;
+    }
+  );
+
+  assert.deepEqual(await readdir(gamesPath), []);
+  assert.deepEqual(await readdir(stagingRoot).catch(() => []), []);
 });
 
 test('getSingleTopLevelFolderFromMembers detects a single top folder', () => {

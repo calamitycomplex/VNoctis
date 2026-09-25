@@ -37,6 +37,11 @@ const execFileAsync = promisify(execFile);
 // Large archives can produce substantial stdout.
 const execOpts = { maxBuffer: 50 * 1024 * 1024 };
 
+// A ZIP symlink's target is stored as the member's content, not in the
+// `zipinfo` listing. Symlink targets are bounded by PATH_MAX on Linux, so cap
+// the read rather than buffering arbitrary member data.
+const ZIP_SYMLINK_TARGET_MAX_BYTES = 4096;
+
 export const IMPORT_STAGING_DIRNAME = 'imports';
 
 // ── Supported archive formats ──────────────────────────
@@ -226,16 +231,70 @@ export function parseZipMemberList(stdout) {
     const line = raw.trim();
     if (!line) continue;
     if (/^-{3,}/.test(line)) continue; // listing separators
-    if (!'-dl?'.includes(line[0])) continue;
+    const typeChar = line[0];
+    if (!'-dl?'.includes(typeChar)) continue;
 
     if (line.includes(' -> ')) {
       const [left, target] = line.split(' -> ');
       members.push({ name: listingName(left), linkKind: 'symlink', linkTarget: target.trim() });
+    } else if (typeChar === 'l') {
+      // zipinfo flagged a symlink via its Unix mode (`lrwxrwxrwx`) but did not
+      // print the target. The target lives in the member content and must be
+      // recovered before extraction, never inferred.
+      members.push({ name: listingName(line), linkKind: 'symlink', linkTarget: null });
     } else {
       members.push({ name: listingName(line), linkKind: null, linkTarget: null });
     }
   }
   return members.filter((m) => m.name);
+}
+
+/**
+ * Read a ZIP symlink member's stored content (its target) without extracting.
+ *
+ * `unzip -p` streams a single member to stdout, so nothing is written to disk.
+ * execFile passes the member name as one argv element, so names containing
+ * spaces or shell metacharacters are safe. `maxBuffer` bounds the read.
+ *
+ * @param {string} archivePath
+ * @param {string} name
+ * @returns {Promise<string>}
+ */
+async function readZipSymlinkTarget(archivePath, name) {
+  const { stdout } = await execFileAsync('unzip', ['-p', archivePath, name], {
+    maxBuffer: ZIP_SYMLINK_TARGET_MAX_BYTES,
+    encoding: 'buffer',
+  });
+
+  // Some toolchains append a trailing newline; a stored symlink target does not
+  // carry one, so strip a single trailing CR/LF run before interpreting it.
+  let end = stdout.length;
+  while (end > 0 && (stdout[end - 1] === 0x0a || stdout[end - 1] === 0x0d)) end -= 1;
+  const raw = stdout.subarray(0, end);
+
+  if (raw.includes(0)) {
+    throw new Error(`Symlink "${name}" target contains NUL bytes.`);
+  }
+  const target = raw.toString('utf8');
+  if (!target) {
+    throw new Error(`Symlink "${name}" has an empty target.`);
+  }
+  return target;
+}
+
+/**
+ * Populate targets for ZIP symlink members that were detected by mode but
+ * listed without `-> target`. Runs before `validateArchiveMembers`, so an
+ * escaping target fails before any extraction.
+ *
+ * @param {string} archivePath
+ * @param {Array<{ name: string, linkKind: string|null, linkTarget: string|null }>} members
+ */
+async function resolveZipSymlinkTargets(archivePath, members) {
+  for (const member of members) {
+    if (member.linkKind !== 'symlink' || member.linkTarget) continue;
+    member.linkTarget = await readZipSymlinkTarget(archivePath, member.name);
+  }
 }
 
 function listingName(line) {
@@ -299,7 +358,9 @@ export function parse7zMemberList(stdout) {
  *
  * ZIP requires `zipinfo` (or equivalent metadata-capable listing). A name-only
  * listing such as `unzip -l` cannot identify symlink entries and is therefore
- * not an accepted safety fallback.
+ * not an accepted safety fallback. ZIP symlink targets are not present in the
+ * listing, so each symlink member's stored content is read with `unzip -p`
+ * (non-extracting) to recover its target before validation.
  *
  * @param {{ archivePath: string, type: string }} params
  * @returns {Promise<Array<{ name: string, linkKind: string|null, linkTarget: string|null }>>}
@@ -317,9 +378,12 @@ export async function inspectArchiveMembers({ archivePath, type }) {
       return parse7zMemberList(stdout).slice(1);
     }
 
-    // zip — must use zipinfo so symlink metadata is available.
+    // zip — must use zipinfo so symlink metadata is available, then read each
+    // symlink member's content to recover its target before extraction.
     const { stdout } = await execFileAsync('zipinfo', [archivePath], execOpts);
-    return parseZipMemberList(stdout);
+    const members = parseZipMemberList(stdout);
+    await resolveZipSymlinkTargets(archivePath, members);
+    return members;
   } catch (err) {
     throw Object.assign(
       new Error(`Could not inspect archive members safely: ${err.message}`),

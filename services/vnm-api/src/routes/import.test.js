@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import Fastify from 'fastify';
+import multipart from '@fastify/multipart';
 import { access, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import importRoutes from './import.js';
 import { importStagingRoot } from '../services/importStaging.js';
@@ -22,8 +23,21 @@ const zipListing = (entries) =>
   ['Archive:  /tmp/sample.zip', ...entries, ''].join('\n');
 const zipEntry = (name) =>
   `-rw-r--r--  3.0 unx  10  bx defN 24-Jan-01 12:00 ${name}`;
+// zipinfo flags a symlink with `lrwxrwxrwx` but does not print `-> target`.
+const zipSymlinkEntry = (name) =>
+  `lrwxrwxrwx  3.0 unx   0  bx defN 24-Jan-01 12:00 ${name}`;
 
-async function fixture(t, { extractExit = 0 } = {}) {
+const multipartBody = (boundary, filename, bytes) =>
+  Buffer.concat([
+    Buffer.from(
+      `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${filename}"\r\n` +
+        'Content-Type: application/zip\r\n\r\n'
+    ),
+    Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes),
+    Buffer.from(`\r\n--${boundary}--\r\n`),
+  ]);
+
+async function fixture(t, { extractExit = 0, listing, symlinkTargets } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'vnoctis-route-import-'));
   const gamesPath = join(root, 'games');
   const webBuilds = join(root, 'web-builds');
@@ -34,8 +48,23 @@ async function fixture(t, { extractExit = 0 } = {}) {
   await writeFile(join(contentsDir, 'MyGame', 'game', 'archive.rpa'), 'RPA-CONTENT');
   await writeFile(join(contentsDir, 'MyGame', 'game', 'script.rpy'), 'label start:');
 
-  const listing = zipListing([zipEntry('MyGame/'), zipEntry('MyGame/game/archive.rpa')]);
-  const tools = await installFakeArchiveTools({ listing, contentsDir });
+  let symlinkTargetsDir = '';
+  if (symlinkTargets) {
+    symlinkTargetsDir = join(root, 'symlink-targets');
+    for (const [memberName, content] of Object.entries(symlinkTargets)) {
+      const p = join(symlinkTargetsDir, memberName);
+      await mkdir(dirname(p), { recursive: true });
+      await writeFile(p, content);
+    }
+  }
+
+  const activeListing =
+    listing || zipListing([zipEntry('MyGame/'), zipEntry('MyGame/game/archive.rpa')]);
+  const tools = await installFakeArchiveTools({
+    listing: activeListing,
+    contentsDir,
+    symlinkTargetsDir,
+  });
   const fakeUnrpa = await installFakeUnrpa({ exitCode: 0 });
   process.env.FAKE_EXTRACT_EXIT = String(extractExit);
 
@@ -62,6 +91,7 @@ async function fixture(t, { extractExit = 0 } = {}) {
 
   const app = Fastify();
   app.decorate('prisma', prisma);
+  await app.register(multipart);
   await app.register(importRoutes);
 
   const previousFetch = global.fetch;
@@ -81,7 +111,7 @@ async function fixture(t, { extractExit = 0 } = {}) {
     await rm(root, { recursive: true, force: true });
   });
 
-  return { app, gamesPath, webBuilds, contentsDir };
+  return { app, root, gamesPath, webBuilds, contentsDir };
 }
 
 const events = (body) =>
@@ -175,4 +205,58 @@ test('staged import keeps the source archive bytes inside staging', async (t) =>
     await readFile(join(contentsDir, 'MyGame', 'game', 'archive.rpa'), 'utf8'),
     'RPA-CONTENT'
   );
+});
+
+test('ordinary ZIP upload imports into staging via /library/import', async (t) => {
+  const boundary = '----vnoctisBoundaryOk';
+  const { app, gamesPath, webBuilds } = await fixture(t);
+
+  const res = await app.inject({
+    method: 'POST',
+    url: '/library/import',
+    headers: { 'content-type': `multipart/form-data; boundary=${boundary}` },
+    payload: multipartBody(boundary, 'MyGame.zip', 'ARCHIVE-BYTES'),
+  });
+
+  assert.equal(res.statusCode, 200);
+  const body = JSON.parse(res.body);
+  assert.equal(body.staged, true);
+  assert.equal(body.promoted, false);
+  assert.ok(body.stagingId.startsWith('MyGame-'));
+  assert.equal(body.path, join(importStagingRoot(webBuilds), body.stagingId));
+  assert.equal(await exists(body.path), true);
+
+  // GAMES_PATH is never written; no work-dir residue.
+  assert.deepEqual(await readdir(gamesPath), []);
+  assert.deepEqual(await readdir(importStagingRoot(webBuilds)), [body.stagingId]);
+});
+
+test('escaping ZIP symlink upload returns HTTP 400 UNSAFE_ARCHIVE without extraction', async (t) => {
+  const boundary = '----vnoctisBoundarySymlink';
+  const { app, gamesPath, webBuilds } = await fixture(t, {
+    // If the extractor were invoked it would exit non-zero and the route would
+    // return 500 IMPORT_FAILED; a 400 UNSAFE_ARCHIVE proves it never ran.
+    extractExit: 1,
+    listing: zipListing([
+      zipEntry('MyGame/'),
+      zipEntry('MyGame/game/script.rpy'),
+      zipSymlinkEntry('MyGame/game/link'),
+    ]),
+    symlinkTargets: { 'MyGame/game/link': '../../../outside' },
+  });
+
+  const res = await app.inject({
+    method: 'POST',
+    url: '/library/import',
+    headers: { 'content-type': `multipart/form-data; boundary=${boundary}` },
+    payload: multipartBody(boundary, 'MyGame.zip', 'ARCHIVE-BYTES'),
+  });
+
+  assert.equal(res.statusCode, 400);
+  const body = JSON.parse(res.body);
+  assert.equal(body.code, 'UNSAFE_ARCHIVE');
+  assert.match(body.message, /Unsafe symlink/);
+
+  assert.deepEqual(await readdir(gamesPath), []);
+  assert.deepEqual(await readdir(importStagingRoot(webBuilds)).catch(() => []), []);
 });

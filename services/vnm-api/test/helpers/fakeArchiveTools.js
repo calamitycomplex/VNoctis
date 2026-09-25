@@ -4,6 +4,8 @@
  * Listing calls (`unzip -l`, `tar -tvjf`, `7z l -slt`) print the seeded
  * listing. Extraction calls copy a seeded contents directory into the target
  * directory, so tests can exercise staging without the real tools.
+ * `unzip -p <archive> <member>` prints the seeded symlink-target content for
+ * that member (`symlinkTargetsDir`), mirroring the real non-extracting read.
  */
 
 import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
@@ -23,6 +25,14 @@ printf '%s\n' "$FAKE_ARCHIVE_LISTING"
 exit 0
 `,
   unzip: `#!/bin/sh
+for a in "$@"; do
+  if [ "$a" = "-p" ]; then
+    member=""
+    for b in "$@"; do member="$b"; done
+    cat "\${FAKE_SYMLINK_TARGETS_DIR:-/nonexistent}/$member"
+    exit $?
+  fi
+done
 case "$*" in *"-l"*) printf '%s\n' "$FAKE_ARCHIVE_LISTING"; exit 0;; esac
 dest=""; prev=""
 for a in "$@"; do
@@ -54,10 +64,15 @@ ${EXTRACT_FAIL_GUARD}
 };
 
 /**
- * @param {{ listing: string, contentsDir: string, zipinfoExit?: number }} params
+ * @param {{ listing: string, contentsDir: string, zipinfoExit?: number, symlinkTargetsDir?: string }} params
  * @returns {Promise<{ binDir: string, restore: () => Promise<void> }>}
  */
-export async function installFakeArchiveTools({ listing, contentsDir, zipinfoExit = 0 }) {
+export async function installFakeArchiveTools({
+  listing,
+  contentsDir,
+  zipinfoExit = 0,
+  symlinkTargetsDir = '',
+}) {
   const binDir = await mkdtemp(join(tmpdir(), 'vnoctis-fake-archive-'));
 
   for (const [name, script] of Object.entries(SCRIPTS)) {
@@ -71,11 +86,13 @@ export async function installFakeArchiveTools({ listing, contentsDir, zipinfoExi
     FAKE_ARCHIVE_LISTING: process.env.FAKE_ARCHIVE_LISTING,
     FAKE_ARCHIVE_CONTENTS: process.env.FAKE_ARCHIVE_CONTENTS,
     FAKE_ZIPINFO_EXIT: process.env.FAKE_ZIPINFO_EXIT,
+    FAKE_SYMLINK_TARGETS_DIR: process.env.FAKE_SYMLINK_TARGETS_DIR,
   };
   process.env.PATH = `${binDir}${previous.PATH ? `:${previous.PATH}` : ''}`;
   process.env.FAKE_ARCHIVE_LISTING = listing;
   process.env.FAKE_ARCHIVE_CONTENTS = contentsDir;
   process.env.FAKE_ZIPINFO_EXIT = String(zipinfoExit);
+  process.env.FAKE_SYMLINK_TARGETS_DIR = symlinkTargetsDir;
 
   return {
     binDir,
