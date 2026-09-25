@@ -2,8 +2,12 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   archiveItemsOf,
+  cardFactsFor,
+  cardTagsFor,
   coverUrlFor,
   displayTitleFor,
+  formatLengthMinutes,
+  originalTitleFor,
   hasRuntimeActions,
   isMultiRelease,
   logicalMetadataFor,
@@ -118,4 +122,84 @@ test('screenshotUrlsFor prefers Title screenshot URLs and falls back to one Game
   const multi = title({ archiveItems: [item({ game: { id: 'g1', screenshots: ['a.jpg'] } }), item({ id: 'item-2', game: { id: 'g2', screenshots: ['b.jpg'] } })] });
   assert.deepEqual(screenshotUrlsFor(multi), []);
   assert.deepEqual(screenshotUrlsFor(null), []);
+});
+
+test('originalTitleFor returns a distinct original title, omits equal/empty values', () => {
+  const t = title({ name: 'Canonical', metadata: { vndbTitle: 'Canonical', vndbTitleOriginal: '原題' } });
+  assert.equal(originalTitleFor(t), '原題');
+
+  // Identical to the primary display title -> omitted.
+  assert.equal(originalTitleFor(title({ name: 'Same', metadata: { vndbTitle: 'Same', vndbTitleOriginal: 'same' } })), null);
+  // Empty / whitespace -> omitted.
+  assert.equal(originalTitleFor(title({ metadata: { vndbTitleOriginal: '   ' } })), null);
+  assert.equal(originalTitleFor(title({ metadata: {} })), null);
+
+  // Single-Game compatibility fallback only.
+  const withGame = title({ name: 'Canonical', archiveItems: [item({ game: { id: 'g1', vndbTitleOriginal: '原題' } })] });
+  assert.equal(originalTitleFor(withGame), '原題');
+
+  // Multi-release Titles do not borrow one Game's original title.
+  const multi = title({
+    name: 'Canonical',
+    archiveItems: [item({ game: { id: 'g1', vndbTitleOriginal: 'A' } }), item({ id: 'item-2', game: { id: 'g2', vndbTitleOriginal: 'B' } })],
+  });
+  assert.equal(originalTitleFor(multi), null);
+});
+
+test('formatLengthMinutes formats short, whole-hour, and partial-hour values', () => {
+  assert.equal(formatLengthMinutes(45), '45m');
+  assert.equal(formatLengthMinutes(60), '1h');
+  assert.equal(formatLengthMinutes(150), '2h 30m');
+  assert.equal(formatLengthMinutes(0), null);
+  assert.equal(formatLengthMinutes(null), null);
+  assert.equal(formatLengthMinutes('nope'), null);
+});
+
+test('cardFactsFor derives rating/year/length from Title metadata with single-Game fallback', () => {
+  const t = title({ metadata: { vndbRating: 8.4, releaseDate: '2021-03-04', lengthMinutes: 1080 } });
+  assert.deepEqual(cardFactsFor(t), { rating: 8.4, year: '2021', length: '18h' });
+
+  // Partial / plain year strings still resolve.
+  assert.equal(cardFactsFor(title({ metadata: { releaseDate: '2024' } })).year, '2024');
+  assert.equal(cardFactsFor(title({ metadata: { releaseDate: 'not-a-date' } })).year, null);
+
+  // Single-Game compatibility fallback.
+  const withGame = title({ archiveItems: [item({ game: { id: 'g1', vndbRating: 7, releaseDate: '2015-01-01', lengthMinutes: 120 } })] });
+  assert.deepEqual(cardFactsFor(withGame), { rating: 7, year: '2015', length: '2h' });
+
+  // Missing fields are omitted (null), not placeholders.
+  assert.deepEqual(cardFactsFor(title({})), { rating: null, year: null, length: null });
+
+  // Multi-release Titles never borrow one Game's facts.
+  const multi = title({
+    archiveItems: [item({ game: { id: 'g1', vndbRating: 9 } }), item({ id: 'item-2', game: { id: 'g2', vndbRating: 5 } })],
+  });
+  assert.equal(cardFactsFor(multi).rating, null);
+});
+
+test('cardTagsFor returns non-spoiler tag names, capped at 3, Title metadata first', () => {
+  const t = title({ metadata: { tags: [{ name: 'A' }, { name: 'B', spoiler: 1 }, { name: 'C' }, { name: 'D' }] } });
+  assert.deepEqual(cardTagsFor(t), ['A', 'C', 'D']);
+
+  const limited = cardTagsFor(title({ metadata: { tags: [{ name: 'A' }, { name: 'B' }, { name: 'C' }, { name: 'D' }] } }), 2);
+  assert.deepEqual(limited, ['A', 'B']);
+
+  // Empty / malformed input is safe.
+  assert.deepEqual(cardTagsFor(title({})), []);
+  assert.deepEqual(cardTagsFor(title({ metadata: { tags: 'not-an-array' } })), []);
+  assert.deepEqual(cardTagsFor(title({ metadata: { tags: [{ spoiler: 0 }, { name: '  ' }] } })), []);
+
+  // Single-Game compatibility fallback.
+  const withGame = title({ archiveItems: [item({ game: { id: 'g1', tags: [{ name: 'GameTag' }] } })] });
+  assert.deepEqual(cardTagsFor(withGame), ['GameTag']);
+
+  // Title tags win over a Game fallback.
+  const both = title({ metadata: { tags: [{ name: 'TitleTag' }] }, archiveItems: [item({ game: { id: 'g1', tags: [{ name: 'GameTag' }] } })] });
+  assert.deepEqual(cardTagsFor(both), ['TitleTag']);
+
+  // Multi-release Titles do not borrow a Game's tags.
+  const multi = title({
+    archiveItems: [item({ game: { id: 'g1', tags: [{ name: 'A' }] } }), item({ id: 'item-2', game: { id: 'g2', tags: [{ name: 'B' }] } })],
+  });
+  assert.deepEqual(cardTagsFor(multi), []);
 });

@@ -157,8 +157,8 @@ export default function Library({ r2Mode = false }) {
   // controls mounted so typing does not lose focus on every request.
   if (loading && titles.length === 0 && pagination.totalItems === 0 && !hasFilters) {
     return (
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 p-6">
-        {Array.from({ length: 12 }).map((_, i) => (
+      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4 p-6">
+        {Array.from({ length: 15 }).map((_, i) => (
           <SkeletonCard key={i} />
         ))}
       </div>
@@ -307,7 +307,7 @@ export default function Library({ r2Mode = false }) {
       {/* Poster grid */}
       {titles.length > 0 ? (
         <>
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
             {titles.map((title) => (
               <TitleCard
                 key={title.id}

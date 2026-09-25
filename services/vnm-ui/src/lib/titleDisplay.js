@@ -103,6 +103,88 @@ export function pickCoverGame(title) {
   return withCover.length === 1 ? withCover[0] : null;
 }
 
+/**
+ * Original / native title for display.
+ *
+ * Uses Title.metadata first (single-Game fallback only), and returns null when
+ * the value is empty or effectively identical to the primary display title, so
+ * cards never show a duplicated title line.
+ */
+export function originalTitleFor(title) {
+  const meta = title?.metadata ?? {};
+  const game = singleGameFor(title);
+  const original = meta.vndbTitleOriginal ?? game?.vndbTitleOriginal ?? null;
+  if (typeof original !== 'string') return null;
+  const trimmed = original.trim();
+  if (!trimmed) return null;
+  const primary = displayTitleFor(title);
+  if (primary && primary.trim().toLowerCase() === trimmed.toLowerCase()) return null;
+  return trimmed;
+}
+
+/**
+ * Compact runtime length label: "45m", "18h", "2h 30m". Null when unknown.
+ */
+export function formatLengthMinutes(minutes) {
+  if (minutes == null) return null;
+  const total = Number(minutes);
+  if (!Number.isFinite(total) || total <= 0) return null;
+  const whole = Math.round(total);
+  const hours = Math.floor(whole / 60);
+  const mins = whole % 60;
+  if (hours === 0) return `${mins}m`;
+  if (mins === 0) return `${hours}h`;
+  return `${hours}h ${mins}m`;
+}
+
+/**
+ * Release year for display. Title metadata first, single-Game fallback only.
+ * Handles partial VNDB dates ("2024-09") and plain years.
+ */
+export function releaseYearFor(title) {
+  const meta = title?.metadata ?? {};
+  const game = singleGameFor(title);
+  const raw = meta.releaseDate ?? game?.releaseDate ?? null;
+  if (!raw) return null;
+  const date = new Date(raw);
+  if (!Number.isNaN(date.getTime())) return String(date.getUTCFullYear());
+  const match = String(raw).match(/(\d{4})/);
+  return match ? match[1] : null;
+}
+
+/**
+ * Compact card facts derived from Title metadata (single-Game fallback only).
+ * Missing facts are null so callers can omit them without empty separators.
+ * Multi-release Titles never borrow one Game's metadata.
+ */
+export function cardFactsFor(title) {
+  if (!title) return { rating: null, year: null, length: null };
+  const meta = logicalMetadataFor(title);
+  return {
+    rating: meta.vndbRating ?? null,
+    year: releaseYearFor(title),
+    length: formatLengthMinutes(meta.lengthMinutes),
+  };
+}
+
+/**
+ * Display-only tag names for the card: non-spoiler tags, capped, stable order.
+ * Title metadata is preferred with a single-Game fallback; malformed input is
+ * treated as empty.
+ */
+export function cardTagsFor(title, max = 3) {
+  const meta = title?.metadata ?? {};
+  const game = singleGameFor(title);
+  const source = Array.isArray(meta.tags) && meta.tags.length > 0
+    ? meta.tags
+    : (Array.isArray(game?.tags) ? game.tags : []);
+  return source
+    .filter((tag) => tag && typeof tag.name === 'string' && tag.name.trim())
+    .filter((tag) => !(tag.spoiler && tag.spoiler > 0))
+    .slice(0, max)
+    .map((tag) => tag.name.trim());
+}
+
 /** True when a Title has more than one ArchiveItem (a multi-release Title). */
 export function isMultiRelease(title) {
   return archiveItemsOf(title).length > 1;

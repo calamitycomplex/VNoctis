@@ -1,13 +1,24 @@
 import { useState } from 'react';
 import { generateGradient, formatRating, getRatingColor, truncate } from '../lib/utils';
-import { archiveItemsOf, coverUrlFor, displayTitleFor, logicalMetadataFor, singleGameFor } from '../lib/titleDisplay';
+import {
+  archiveItemsOf,
+  cardFactsFor,
+  cardTagsFor,
+  coverUrlFor,
+  displayTitleFor,
+  logicalMetadataFor,
+  originalTitleFor,
+  singleGameFor,
+} from '../lib/titleDisplay';
 
 /**
  * Card for one logical Title.
  *
- * Title is the identity (React key and click target). A single-release Title
- * delegates its familiar Game-backed presentation; a multi-release Title shows
- * the Title name and a release count instead of picking a primary Game.
+ * Title is the identity (React key and click target). Portrait poster layout
+ * with a compact metadata block: canonical title, original title, facts row,
+ * tag chips, developer, and runtime/source badges. All data comes from Title
+ * metadata with a single-Game compatibility fallback — multi-release Titles
+ * never borrow one release's metadata.
  */
 export default function TitleCard({ title, onClick, onHide, onFavorite, isAdmin = true, r2Mode = false }) {
   const [hovered, setHovered] = useState(false);
@@ -15,8 +26,11 @@ export default function TitleCard({ title, onClick, onHide, onFavorite, isAdmin 
   const items = archiveItemsOf(title);
   const game = singleGameFor(title);
   const name = displayTitleFor(title);
+  const originalTitle = originalTitleFor(title);
   // Title.metadata is authoritative; nested Game is a compatibility fallback.
   const meta = logicalMetadataFor(title);
+  const facts = cardFactsFor(title);
+  const tags = cardTagsFor(title);
   const gradient = generateGradient(name);
 
   // Title-owned cover URL when resolvable; falls back to a single legacy Game.
@@ -28,37 +42,65 @@ export default function TitleCard({ title, onClick, onHide, onFavorite, isAdmin 
   const isMulti = items.length > 1;
   // Runtime/favorite/hide controls only exist when a specific Game is unambiguous.
   const canAct = !!game && !isMulti;
+  const availableSources = items.filter((item) => item.sourceAvailable).length;
+
+  const handleActivate = () => onClick?.(title);
+  const handleKeyDown = (e) => {
+    if (e.target !== e.currentTarget) return;
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      handleActivate();
+    }
+  };
+
+  const factNodes = [];
+  if (facts.rating != null) {
+    factNodes.push(
+      <span key="rating" className="inline-flex items-center gap-1 text-amber-500 dark:text-amber-400 font-semibold">
+        <svg aria-hidden="true" className="w-3 h-3 fill-current" viewBox="0 0 24 24">
+          <path d="M12 2.5l2.9 6.1 6.6.9-4.8 4.6 1.2 6.5L12 17.5 6.1 20.6l1.2-6.5L2.5 9.5l6.6-.9L12 2.5Z" />
+        </svg>
+        {formatRating(facts.rating)}
+      </span>,
+    );
+  }
+  if (facts.year) factNodes.push(<span key="year">{facts.year}</span>);
+  if (facts.length) factNodes.push(<span key="length">{facts.length}</span>);
 
   return (
     <div
-      className={`relative flex flex-col rounded-lg overflow-hidden shadow-lg dark:shadow-gray-900/50 cursor-pointer card-hover-scale transition-all duration-200 group ${
+      role="button"
+      tabIndex={0}
+      aria-label={`Open details for ${name}`}
+      className={`relative flex flex-col rounded-lg overflow-hidden shadow-lg dark:shadow-gray-900/50 cursor-pointer card-hover-scale transition-all duration-200 group focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
         game?.hidden
           ? 'opacity-50 ring-2 ring-dashed ring-orange-400/50'
           : 'ring-1 ring-gray-200 dark:ring-gray-700/50'
       }`}
-      onClick={() => onClick?.(title)}
+      onClick={handleActivate}
+      onKeyDown={handleKeyDown}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
     >
-      {/* Image area — 16:9 aspect ratio with blur-fill background */}
-      <div className="relative aspect-video w-full bg-gray-900">
+      {/* Poster area — 2:3 portrait, blurred fill behind a contained cover */}
+      <div className="relative aspect-[2/3] w-full bg-gray-900">
         {coverUrl ? (
           <>
             <img
               src={coverUrl}
               alt=""
               aria-hidden="true"
-              className="absolute inset-0 w-full h-full object-cover scale-110 blur-xl brightness-[0.35] rounded-t-lg"
+              className="absolute inset-0 w-full h-full object-cover scale-110 blur-xl brightness-[0.35]"
             />
             <img
               src={coverUrl}
               alt={name}
               loading="lazy"
-              className="absolute inset-0 w-full h-full object-contain drop-shadow-[0_2px_8px_rgba(0,0,0,0.6)] rounded-t-lg"
+              className="absolute inset-0 w-full h-full object-contain drop-shadow-[0_2px_8px_rgba(0,0,0,0.6)]"
             />
           </>
         ) : (
-          <div className="absolute inset-0 rounded-t-lg" style={{ background: gradient }}>
+          <div className="absolute inset-0" style={{ background: gradient }}>
             <div className="flex items-center justify-center h-full">
               <span className="text-3xl font-bold text-white/30 select-none">
                 {name.charAt(0).toUpperCase()}
@@ -67,18 +109,19 @@ export default function TitleCard({ title, onClick, onHide, onFavorite, isAdmin 
           </div>
         )}
 
-        {/* Rating badge — display metadata from the compatibility Game */}
-        {meta.vndbRating != null && (
+        {/* Rating badge */}
+        {facts.rating != null && (
           <div
-            className={`absolute top-2 right-2 px-2 py-0.5 rounded-full text-xs font-bold text-white shadow ${getRatingColor(meta.vndbRating)}`}
+            className={`absolute top-2 right-2 px-2 py-0.5 rounded-full text-xs font-bold text-white shadow ${getRatingColor(facts.rating)}`}
           >
-            {formatRating(meta.vndbRating)}
+            {formatRating(facts.rating)}
           </div>
         )}
 
         {/* Favorite heart — single unambiguous Game only */}
         {onFavorite && canAct && (
           <button
+            type="button"
             onClick={(e) => {
               e.stopPropagation();
               onFavorite(title);
@@ -89,8 +132,9 @@ export default function TitleCard({ title, onClick, onHide, onFavorite, isAdmin 
                 : 'bg-black/40 text-white/50 hover:bg-black/60 hover:text-red-400 opacity-70 group-hover:opacity-100'
             }`}
             title={game.favorite ? 'Remove from favorites' : 'Add to favorites'}
+            aria-label={game.favorite ? 'Remove from favorites' : 'Add to favorites'}
           >
-            <svg className="w-4 h-4" fill={game.favorite ? 'currentColor' : 'none'} viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+            <svg aria-hidden="true" className="w-4 h-4" fill={game.favorite ? 'currentColor' : 'none'} viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" d="M21 8.25c0-2.485-2.099-4.5-4.688-4.5-1.935 0-3.597 1.126-4.312 2.733-.715-1.607-2.377-2.733-4.313-2.733C5.1 3.75 3 5.765 3 8.25c0 7.22 9 12 9 12s9-4.78 9-12Z" />
             </svg>
           </button>
@@ -125,14 +169,14 @@ export default function TitleCard({ title, onClick, onHide, onFavorite, isAdmin 
           )}
           {game?.buildStatus === 'built' && (
             <span className="flex items-center justify-center w-6 h-6 rounded-full bg-green-600/80 text-white shadow">
-              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" strokeWidth={3} stroke="currentColor">
+              <svg aria-hidden="true" className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" strokeWidth={3} stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
               </svg>
             </span>
           )}
           {game?.buildStatus === 'failed' && (
             <span className="flex items-center justify-center w-6 h-6 rounded-full bg-red-600/80 text-white shadow">
-              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" strokeWidth={3} stroke="currentColor">
+              <svg aria-hidden="true" className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" strokeWidth={3} stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
               </svg>
             </span>
@@ -142,6 +186,7 @@ export default function TitleCard({ title, onClick, onHide, onFavorite, isAdmin 
         {/* Hide/Unhide — single unambiguous Game only, admin only */}
         {isAdmin && onHide && canAct && (
           <button
+            type="button"
             onClick={(e) => {
               e.stopPropagation();
               onHide(title);
@@ -152,14 +197,15 @@ export default function TitleCard({ title, onClick, onHide, onFavorite, isAdmin 
                 : 'bg-black/40 text-white/70 hover:bg-black/60 hover:text-white opacity-0 group-hover:opacity-100'
             }`}
             title={game.hidden ? 'Unhide this title' : 'Hide this title'}
+            aria-label={game.hidden ? 'Unhide this title' : 'Hide this title'}
           >
             {game.hidden ? (
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+              <svg aria-hidden="true" className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M2.036 12.322a1.012 1.012 0 0 1 0-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178Z" />
                 <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" />
               </svg>
             ) : (
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+              <svg aria-hidden="true" className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M3.98 8.223A10.477 10.477 0 0 0 1.934 12C3.226 16.338 7.244 19.5 12 19.5c.993 0 1.953-.138 2.863-.395M6.228 6.228A10.451 10.451 0 0 1 12 4.5c4.756 0 8.773 3.162 10.065 7.498a10.522 10.522 0 0 1-4.293 5.774M6.228 6.228 3 3m3.228 3.228 3.65 3.65m7.894 7.894L21 21m-3.228-3.228-3.65-3.65m0 0a3 3 0 1 0-4.243-4.243m4.242 4.242L9.88 9.88" />
               </svg>
             )}
@@ -167,8 +213,8 @@ export default function TitleCard({ title, onClick, onHide, onFavorite, isAdmin 
         )}
       </div>
 
-      {/* Info section below image */}
-      <div className="px-3 py-2 bg-white dark:bg-gray-800">
+      {/* Compact info block */}
+      <div className="flex flex-1 flex-col px-3 py-2 bg-white dark:bg-gray-800 min-w-0">
         {game?.hidden && (
           <span className="float-right ml-2 px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-orange-500/20 text-orange-400">
             Hidden
@@ -177,12 +223,43 @@ export default function TitleCard({ title, onClick, onHide, onFavorite, isAdmin 
         <h3 className="text-sm font-semibold text-gray-900 dark:text-white leading-tight line-clamp-2">
           {name}
         </h3>
-        {meta.developer && (
-          <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5 truncate">{meta.developer}</p>
+        {originalTitle && (
+          <p className="text-xs text-gray-500 dark:text-gray-400 leading-tight line-clamp-1" title={originalTitle}>
+            {originalTitle}
+          </p>
         )}
+
+        {factNodes.length > 0 && (
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 mt-1 text-[11px] text-gray-500 dark:text-gray-400">
+            {factNodes.map((node, i) => (
+              <span key={node.key} className="inline-flex items-center gap-2">
+                {i > 0 && <span className="text-gray-300 dark:text-gray-600">·</span>}
+                {node}
+              </span>
+            ))}
+          </div>
+        )}
+
+        {tags.length > 0 && (
+          <div className="flex flex-wrap gap-1 mt-1.5">
+            {tags.map((tag) => (
+              <span
+                key={tag}
+                className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-gray-100 dark:bg-gray-700/60 text-gray-600 dark:text-gray-300 truncate max-w-full"
+              >
+                {tag}
+              </span>
+            ))}
+          </div>
+        )}
+
+        {meta.developer && (
+          <p className="text-xs text-gray-500 dark:text-gray-400 mt-1 truncate">{meta.developer}</p>
+        )}
+
         {isMulti && (
           <p className="text-[11px] text-gray-500 dark:text-gray-400 mt-0.5">
-            {items.filter((item) => item.sourceAvailable).length} of {items.length} sources available
+            {availableSources} of {items.length} sources available
           </p>
         )}
         {r2Mode && game?.buildStatus === 'built' && (
@@ -194,11 +271,20 @@ export default function TitleCard({ title, onClick, onHide, onFavorite, isAdmin 
         )}
       </div>
 
-      {/* Hover overlay with synopsis — single-release Game metadata only */}
-      {hovered && meta.synopsis && (
-        <div className="absolute inset-0 bg-black/80 flex flex-col justify-end p-4 rounded-lg transition-opacity duration-200">
-          <h3 className="text-sm font-semibold text-white mb-2 line-clamp-2">{name}</h3>
-          <p className="text-xs text-gray-300 leading-relaxed line-clamp-4">{truncate(meta.synopsis, 200)}</p>
+      {/* Hover: synopsis + explicit details affordance (bottom gradient, top badges stay visible) */}
+      {hovered && (
+        <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 rounded-b-lg bg-gradient-to-t from-black/95 via-black/80 to-transparent p-4 pt-10">
+          {meta.synopsis && (
+            <p className="text-xs text-gray-200 leading-relaxed line-clamp-3">
+              {truncate(meta.synopsis, 180)}
+            </p>
+          )}
+          <span className="mt-2 inline-flex items-center gap-1 text-[11px] font-semibold text-blue-300">
+            View details
+            <svg aria-hidden="true" className="w-3 h-3" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 4.5 21 12l-7.5 7.5M3 12h18" />
+            </svg>
+          </span>
         </div>
       )}
     </div>
