@@ -8,11 +8,24 @@ generator client {
 }
 
 model Title {
-  id           String        @id @default(uuid())
-  name         String? // Display identity; initialized from scan extraction, not unique
-  createdAt    DateTime      @default(now())
-  updatedAt    DateTime      @updatedAt
-  archiveItems ArchiveItem[]
+  id                String        @id @default(uuid())
+  name              String? // Display identity; initialized from scan extraction, not unique
+  vndbId            String? // e.g. "v17"
+  vndbTitle         String? // English title from VNDB
+  vndbTitleOriginal String? // Japanese/original title
+  synopsis          String? // Full synopsis
+  developer         String? // Developer studio
+  releaseDate       DateTime? // First release date
+  lengthMinutes     Int? // Estimated play time
+  vndbRating        Float? // Score 0-10
+  coverPath         String? // Local path to cached cover (compatibility reference)
+  tags              String        @default("[]") // JSON array of { id, name, spoiler }
+  screenshots       String        @default("[]") // JSON array of screenshot URLs
+  metadataSource    String        @default("unmatched") // auto|manual|unmatched
+  metadataFetchedAt DateTime? // Last VNDB fetch time
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+  archiveItems      ArchiveItem[]
 }
 
 model ArchiveItem {
