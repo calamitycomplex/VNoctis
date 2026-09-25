@@ -11,6 +11,12 @@ from pathlib import Path
 import httpx
 
 from compressor import create_compressed_overlay, cleanup_overlay
+from build_workspace import (
+    resolve_work_root,
+    workspace_paths,
+    stage_input_tree,
+    cleanup_workspace,
+)
 from logger import setup_logger
 
 logger = setup_logger("vnm-builder.builder")
@@ -44,12 +50,17 @@ class RenPyBuilder:
         self.logs_dir = self.web_builds_path / "logs"
         self.logs_dir.mkdir(parents=True, exist_ok=True)
 
+        # Application-owned writable workspace root for staged build inputs.
+        self.work_root = resolve_work_root()
+        self.work_root.mkdir(parents=True, exist_ok=True)
+
         logger.info(
-            "RenPyBuilder initialised — sdk=%s  version=%s  games=%s  builds=%s",
+            "RenPyBuilder initialised — sdk=%s  version=%s  games=%s  builds=%s  work=%s",
             self.sdk_path,
             self.sdk_version,
             self.games_path,
             self.web_builds_path,
+            self.work_root,
         )
 
     # ── SDK version detection ──────────────────────────────
@@ -207,9 +218,11 @@ class RenPyBuilder:
     ):
         """Execute the Ren'Py web build for a game.
 
-        Uses the ``web_build`` command via the SDK launcher::
+        The supplied ``game_path`` is read-only source material. It is copied
+        into a private workspace and the ``web_build`` command runs against the
+        workspace (or its compressed overlay) via the SDK launcher::
 
-            renpy.sh <sdk>/launcher web_build <game_path> --destination <output_dir>
+            renpy.sh <sdk>/launcher web_build <workspace> --destination <output_dir>
 
         Parameters
         ----------
@@ -218,13 +231,14 @@ class RenPyBuilder:
         game_id : str
             The Game ID for output directory naming.
         game_path : str
-            Absolute path to the game directory inside the container.
+            Absolute path to the read-only source game directory.
         log_callback : async callable(str)
             Called with each line of build output.
         """
         log_file = self.logs_dir / f"{job_id}.log"
         dir_name = Path(game_path).name
         output_dir = self.web_builds_path / dir_name
+        workspace_dir, overlay_dir = workspace_paths(self.work_root, job_id)
         start_time = time.monotonic()
 
         async def _log(line: str):
@@ -257,36 +271,32 @@ class RenPyBuilder:
                 await asyncio.to_thread(shutil.rmtree, output_dir)
             output_dir.mkdir(parents=True, exist_ok=True)
 
-            # ── Compress images into overlay (if enabled) ────
-            overlay_dir = Path(f"/tmp/build-{job_id}")
-            build_source = game_path  # default: build from original
+            # ── Stage a private writable workspace (always) ──
+            # The supplied game_path is read-only source material; Ren'Py and
+            # compression must only ever write here. If staging fails, the build
+            # fails — there is no fallback to game_path.
+            await _log(
+                f"[vnm-builder] Staging private build workspace at {workspace_dir}"
+            )
+            try:
+                await asyncio.to_thread(stage_input_tree, game_path, workspace_dir)
+            except Exception as ws_exc:
+                await _log(
+                    f"[vnm-builder] ❌ Build workspace preparation failed: {ws_exc}"
+                )
+                logger.error(
+                    "Workspace preparation failed job=%s game=%s error=%s",
+                    job_id, game_id, ws_exc,
+                )
+                raise RuntimeError(
+                    f"Build workspace preparation failed: {ws_exc}"
+                ) from ws_exc
 
-            if compress_assets:
-                try:
-                    await _log("[vnm-builder] Compressing images for web build...")
-                    compress_stats = await create_compressed_overlay(
-                        game_path, str(overlay_dir), log_callback=_log,
-                    )
-                    build_source = str(overlay_dir)
-                    await _log(
-                        f"[vnm-builder] Image compression complete — "
-                        f"building from overlay at {overlay_dir}"
-                    )
-                except Exception as comp_exc:
-                    await _log(
-                        f"[vnm-builder] ⚠️ Image compression failed: {comp_exc} "
-                        f"— building uncompressed from original game files"
-                    )
-                    logger.warning(
-                        "Compression failed job=%s: %s — proceeding uncompressed",
-                        job_id, comp_exc,
-                    )
-                    build_source = game_path
-            else:
-                await _log("[vnm-builder] Asset compression skipped (user opted out)")
+            # Never the supplied game_path.
+            build_source = str(workspace_dir)
 
-            # ── Write progressive_download.txt for web build ──
-            prog_dl = Path(build_source) / "progressive_download.txt"
+            # ── Write progressive_download.txt inside the workspace ──
+            prog_dl = workspace_dir / "progressive_download.txt"
             if prog_dl.exists():
                 await _log(
                     "[vnm-builder] progressive_download.txt already exists "
@@ -311,6 +321,32 @@ class RenPyBuilder:
                     f"[vnm-builder] Wrote progressive_download.txt to {build_source}"
                 )
 
+            # ── Compress images into an independent-copy overlay ────
+            if compress_assets:
+                try:
+                    await _log("[vnm-builder] Compressing images for web build...")
+                    compress_stats = await create_compressed_overlay(
+                        str(workspace_dir), str(overlay_dir), log_callback=_log,
+                    )
+                    build_source = str(overlay_dir)
+                    await _log(
+                        f"[vnm-builder] Image compression complete — "
+                        f"building from overlay at {overlay_dir}"
+                    )
+                except Exception as comp_exc:
+                    await _log(
+                        f"[vnm-builder] ⚠️ Image compression failed: {comp_exc} "
+                        f"— building uncompressed from the private workspace"
+                    )
+                    logger.warning(
+                        "Compression failed job=%s: %s — proceeding from workspace",
+                        job_id, comp_exc,
+                    )
+                    cleanup_overlay(str(overlay_dir))
+                    build_source = str(workspace_dir)
+            else:
+                await _log("[vnm-builder] Asset compression skipped (user opted out)")
+
             # ── web_build via launcher ───────────────────────
             await _log("[vnm-builder] Building web distribution via web_build...")
             launcher_path = os.path.join(str(self.sdk_path), 'launcher')
@@ -319,7 +355,7 @@ class RenPyBuilder:
                 launcher,           # renpy.sh path
                 launcher_path,      # /renpy-sdk/launcher as the basedir
                 'web_build',        # the web_build command
-                build_source,       # overlay (compressed) or original game path
+                build_source,       # private workspace, or its compressed overlay
                 '--destination',    # destination flag
                 str(output_dir),    # /web-builds/{dirName}
             ]
@@ -413,8 +449,9 @@ class RenPyBuilder:
             was_cancelled = job_id in self._cancelled_jobs
             self._cancelled_jobs.discard(job_id)
             self.active_builds.pop(job_id, None)
-            # Always clean up the compression overlay
-            cleanup_overlay(str(Path(f"/tmp/build-{job_id}")))
+            # Always clean up this job's overlay and private workspace only.
+            cleanup_overlay(str(overlay_dir))
+            cleanup_workspace(workspace_dir)
             # If cancelled, remove the partial output directory so stale
             # files don't linger on disk until the next build.
             if was_cancelled and output_dir.exists():
