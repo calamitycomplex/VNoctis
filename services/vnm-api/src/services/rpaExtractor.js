@@ -5,8 +5,11 @@
  * subdirectory, then removes the originals so the builder doesn't have
  * to repack them.
  *
- * Shared between the import and build flows — any game that reaches the
- * builder should have its .rpa files pre-extracted.
+ * Shared between the import and build flows. Extraction is always in-place
+ * against the path it is given:
+ *   - import passes the extracted source tree (import behavior unchanged), and
+ *   - build passes an isolated staging copy so the archive source is never
+ *     touched.
  */
 
 import { readdir, rm, stat, access } from 'node:fs/promises';
@@ -41,8 +44,11 @@ export async function pathExists(p) {
  *
  * @param {string} gamePath - Path to the game root (e.g. /games/MyGame).
  * @param {import('pino').Logger} logger
+ * @param {{ strict?: boolean }} [options] - When `strict` is true, a failed
+ *   extraction throws instead of being logged and skipped. The build flow uses
+ *   this so preparation failures fail the build cleanly.
  */
-export async function extractRpaArchives(gamePath, logger) {
+export async function extractRpaArchives(gamePath, logger, { strict = false } = {}) {
   const gameSubdir = join(gamePath, 'game');
 
   // If there's no game/ subdirectory this isn't a standard Ren'Py layout
@@ -71,6 +77,11 @@ export async function extractRpaArchives(gamePath, logger) {
         { err: err.message, file: rpaFile },
         'Failed to extract .rpa archive — leaving it in place'
       );
+      if (strict) {
+        throw new Error(`Failed to extract .rpa archive "${rpaFile}": ${err.message}`, {
+          cause: err,
+        });
+      }
     }
   }
 }

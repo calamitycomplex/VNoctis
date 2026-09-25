@@ -1,4 +1,9 @@
 import { extractRpaArchives } from '../services/rpaExtractor.js';
+import {
+  createBuildWorkspace,
+  cleanupBuildWorkspace,
+  sweepStaleBuildWorkspaces,
+} from '../services/buildWorkspace.js';
 
 /**
  * Build management route plugin.
@@ -72,21 +77,62 @@ export default async function buildRoutes(fastify) {
       },
     });
 
-    // Extract any .rpa archives before building — same as the import flow.
-    // Games that were added manually (not through import) or that had
-    // .rpa files restored after a previous extraction need this step.
-    // Skipped when the user opts out of asset compression from the UI.
-    if (compressAssets) {
-      try {
-        await extractRpaArchives(game.directoryPath, request.log);
-      } catch (rpaErr) {
-        request.log.warn(
-          { err: rpaErr.message, gameId },
-          'Pre-build .rpa extraction failed — continuing with build anyway'
-        );
+    // Prepare every build from an isolated staging copy.
+    //
+    // `game.directoryPath` is archive source storage and may be read-only, so
+    // it is never handed to the builder as its working/project path, and
+    // .rpa extraction/deletion must never run in-place against it. We always
+    // copy the source into an application-owned workspace; RPA extraction runs
+    // there when compression is requested, and the builder is always pointed at
+    // that workspace.
+    let workspacePath = null;
+
+    try {
+      await sweepStaleBuildWorkspaces({ basePath: WEB_BUILDS_PATH, logger: request.log });
+      workspacePath = await createBuildWorkspace({
+        sourcePath: game.directoryPath,
+        basePath: WEB_BUILDS_PATH,
+        jobId: buildJob.id,
+        logger: request.log,
+      });
+
+      if (compressAssets) {
+        await extractRpaArchives(workspacePath, request.log, { strict: true });
+      } else {
+        request.log.info({ gameId }, 'Skipping .rpa extraction (compressAssets=false)');
       }
-    } else {
-      request.log.info({ gameId }, 'Skipping .rpa extraction (compressAssets=false)');
+    } catch (prepErr) {
+      request.log.error(
+        { err: prepErr.message, gameId, workspacePath },
+        'Build preparation failed — failing build without touching the source'
+      );
+
+      await cleanupBuildWorkspace(workspacePath, {
+        basePath: WEB_BUILDS_PATH,
+        logger: request.log,
+      });
+
+      await fastify.prisma.buildJob.update({
+        where: { id: buildJob.id },
+        data: {
+          status: 'failed',
+          error: `Build preparation failed: ${prepErr.message}`,
+          completedAt: new Date(),
+        },
+      });
+      await fastify.prisma.game.update({
+        where: { id: gameId },
+        data: {
+          buildStatus: 'failed',
+          buildJobId: buildJob.id,
+        },
+      });
+
+      return reply.code(500).send({
+        code: 'BUILD_PREPARATION_FAILED',
+        message: `Build preparation failed: ${prepErr.message}`,
+        jobId: buildJob.id,
+      });
     }
 
     // Delegate to vnm-builder
@@ -97,7 +143,7 @@ export default async function buildRoutes(fastify) {
         body: JSON.stringify({
           jobId: buildJob.id,
           gameId,
-          gamePath: game.directoryPath,
+          gamePath: workspacePath,
           compressAssets: !!compressAssets,
         }),
       });
@@ -124,6 +170,11 @@ export default async function buildRoutes(fastify) {
             buildStatus: 'failed',
             buildJobId: buildJob.id,
           },
+        });
+
+        await cleanupBuildWorkspace(workspacePath, {
+          basePath: WEB_BUILDS_PATH,
+          logger: request.log,
         });
 
         return reply.code(502).send({
@@ -153,6 +204,11 @@ export default async function buildRoutes(fastify) {
           buildStatus: 'failed',
           buildJobId: buildJob.id,
         },
+      });
+
+      await cleanupBuildWorkspace(workspacePath, {
+        basePath: WEB_BUILDS_PATH,
+        logger: request.log,
       });
 
       return reply.code(502).send({
