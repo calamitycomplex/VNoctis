@@ -86,10 +86,16 @@ model User {
   username     String         @unique
   passwordHash String // bcrypt hash (cost factor 12)
   role         String         @default("viewer") // "admin" | "viewer"
+  // Per-app-user Kasm identity. Using one dedicated Kasm user per app user is
+  // what makes the image volume template `{custom_attribute_1}` stable independent
+  // of other app users; `custom_attribute_1` is that user's UUID set once.
+  kasmUsername String?        @unique
+  kasmUserId   String?
   createdAt    DateTime       @default(now())
   updatedAt    DateTime       @updatedAt
   favorites    UserFavorite[]
   webRequests  WebRequest[]
+  browserSessions BrowserSession[]
 }
 
 model UserFavorite {
@@ -112,10 +118,12 @@ model BrowserRuntime {
   state         String       @default("REQUESTED") // REQUESTED|PREPARING|TESTING|READY|BROKEN|UNSUPPORTED
   archiveItemId String?
   note          String?
+  manifestId    String? // Admin-owned runtime-manifest key under MANIFEST_ROOT
   createdAt     DateTime     @default(now())
   updatedAt     DateTime     @updatedAt
   title         Title        @relation(fields: [titleId], references: [id], onDelete: Cascade)
   archiveItem   ArchiveItem? @relation(fields: [archiveItemId], references: [id], onDelete: SetNull)
+  sessions      BrowserSession[]
 
   @@index([archiveItemId])
 }
@@ -132,6 +140,34 @@ model WebRequest {
   @@unique([titleId, userId])
   @@index([titleId])
   @@index([userId])
+}
+
+// A single live/recent browser-play attempt for one user + prepared runtime.
+//
+// `activeKey` is set to "<userId>" while the session is active and cleared to
+// NULL once it ends. This enforces AT MOST ONE active browser session per app
+// user, which is required for correctness: a per-user Kasm identity carries a
+// single mutable `custom_attribute_2` (runtime id) that Kasm re-expands while a
+// kasm is still ASSIGNED/REQUESTED, so it must not change during an active
+// session. SQLite treats NULLs as distinct, so any number of ended rows coexist
+// and different users (separate Kasm identities) run concurrently.
+model BrowserSession {
+  id               String         @id @default(uuid())
+  browserRuntimeId String
+  userId           String
+  kasmSessionId    String?        @unique
+  state            String         @default("STARTING") // STARTING|RUNNING|STOPPING|ENDED|ERROR
+  activeKey        String?        @unique
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+  lastSeenAt       DateTime       @default(now())
+  endedAt          DateTime?
+  browserRuntime   BrowserRuntime @relation(fields: [browserRuntimeId], references: [id], onDelete: Cascade)
+  user             User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([browserRuntimeId])
+  @@index([userId])
+  @@index([state])
 }
 
 model BuildJob {

@@ -27,6 +27,14 @@ import { SteamClient } from './services/steamClient.js';
 import { runBatchTitleEnrichment } from './services/enrichment.js';
 import { checkStaleBuilds } from './services/buildOrchestrator.js';
 import { DirectoryWatcher } from './services/watcher.js';
+import { createKasmClient } from './services/kasmClient.js';
+import {
+  DEFAULT_ALLOWED_RUNNER_IMAGES,
+  GOLDEN_ROOT_DEFAULT,
+  MANIFEST_ROOT_DEFAULT,
+} from './services/runtimeManifest.js';
+import { USER_RUNTIME_ROOT_DEFAULT } from './services/runtimeState.js';
+import { defaultLockRegistry } from './services/runtimeTarget.js';
 import { deployMigrations, ensureGamePublishColumns } from './services/migrationCompat.js';
 
 // ── R2 database selection ─────────────────────────────
@@ -161,6 +169,40 @@ try {
 // ── Builder URL ───────────────────────────────────────────
 const builderUrl = process.env.BUILDER_URL || 'http://vnm-builder:3002';
 fastify.decorate('builderUrl', builderUrl);
+
+// ── Browser-play runtime configuration ────────────────────
+// Paths are the container view of the separately-mounted runtime roots. The
+// Kasm client stays null until credentials are injected, so the API starts
+// fine before the Kasm Developer API key exists.
+fastify.decorate('goldenRoot', process.env.GOLDEN_ROOT || GOLDEN_ROOT_DEFAULT);
+fastify.decorate('manifestRoot', process.env.MANIFEST_ROOT || MANIFEST_ROOT_DEFAULT);
+fastify.decorate('userRuntimeRoot', process.env.USER_RUNTIME_ROOT || USER_RUNTIME_ROOT_DEFAULT);
+const configuredRunnerImages = (process.env.KASM_ALLOWED_IMAGES || '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+fastify.decorate(
+  'allowedRunnerImages',
+  configuredRunnerImages.length > 0 ? configuredRunnerImages : DEFAULT_ALLOWED_RUNNER_IMAGES,
+);
+
+fastify.decorate(
+  'kasmClient',
+  process.env.KASM_BASE_URL && process.env.KASM_API_KEY && process.env.KASM_API_KEY_SECRET
+    ? createKasmClient({
+        baseUrl: process.env.KASM_BASE_URL,
+        apiKey: process.env.KASM_API_KEY,
+        apiKeySecret: process.env.KASM_API_KEY_SECRET,
+        imageId: process.env.KASM_IMAGE_ID || null,
+        caPath: process.env.KASM_CA_PATH || null,
+        logger: fastify.log,
+      })
+    : null,
+);
+
+// Shared process-wide lock so `launchBrowserSession` serializes the
+// setRuntimeTarget -> requestSession pair per app user across requests.
+fastify.decorate('kasmLockRegistry', defaultLockRegistry);
 
 // ── Build log buffers and SSE subscriber maps ─────────────
 // Used by internal.js callback routes and build.js SSE endpoint

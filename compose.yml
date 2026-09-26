@@ -27,6 +27,11 @@ services:
       - ${VNM_ROOT}/covers:/covers
       - ${VNM_ROOT}/screenshots:/screenshots
       - ${VNM_ROOT}/web-builds:/web-builds:rw
+      # Browser-play launch foundation. Golden is read-only (COW clone source);
+      # users is the per-user writable runtime tree; manifests is app/admin owned.
+      - ${VN_RUNTIME_ROOT:-/srv/vn-runtime}/golden:/vn-runtime/golden:ro
+      - ${VN_RUNTIME_ROOT:-/srv/vn-runtime}/manifests:/vn-runtime/manifests
+      - ${VN_RUNTIME_ROOT:-/srv/vn-runtime}/users:/vn-runtime/users:rw
     environment:
       PUID: ${PUID}
       PGID: ${PGID}
@@ -35,6 +40,14 @@ services:
       COVERS_PATH: /covers
       SCREENSHOTS_PATH: /screenshots
       WEB_BUILDS_PATH: /web-builds
+      GOLDEN_ROOT: /vn-runtime/golden
+      MANIFEST_ROOT: /vn-runtime/manifests
+      USER_RUNTIME_ROOT: /vn-runtime/users
+      KASM_BASE_URL: ${KASM_BASE_URL:-https://holo}
+      KASM_API_KEY: ${KASM_API_KEY:-}
+      KASM_API_KEY_SECRET: ${KASM_API_KEY_SECRET:-}
+      KASM_IMAGE_ID: ${KASM_IMAGE_ID:-}
+      KASM_CA_PATH: ${KASM_CA_PATH:-/data/kasm-ca.crt}
       VNDB_API_BASE: ${VNDB_API_BASE}
       VNDB_RATE_DELAY_MS: ${VNDB_RATE_DELAY_MS}
       VNDB_MATCH_THRESHOLD: ${VNDB_MATCH_THRESHOLD}
@@ -48,6 +61,10 @@ services:
       LOG_PATH: /data/logs
       LOG_LEVEL: ${LOG_LEVEL}
       TZ: ${TZ}
+    # Reach the host-published Kasm proxy by its certificate CN (holo) so TLS
+    # hostname verification succeeds against the mounted Kasm CA.
+    extra_hosts:
+      - "holo:host-gateway"
     networks:
       - vnm-network
     healthcheck:

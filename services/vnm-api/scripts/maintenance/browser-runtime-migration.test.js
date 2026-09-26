@@ -104,7 +104,9 @@ test('A. migrate from zero creates BrowserRuntime and WebRequest with exact defi
 
 test('B. legacy database keeps rows and relationships while gaining the new tables', async () => {
   await withTempDb(async ({ dbPath }) => {
-    const dirs = (await listMigrationDirs()).filter((name) => name !== NEW_MIGRATION);
+    // Pre-BrowserRuntime baseline: apply everything strictly BEFORE the
+    // browser-runtime migration (later additive migrations assume that table).
+    const dirs = (await listMigrationDirs()).filter((name) => name < NEW_MIGRATION);
     const db = new DatabaseSync(dbPath);
     try {
       for (const name of dirs) db.exec(await readFile(join(migrationsDir, name, 'migration.sql'), 'utf8'));
