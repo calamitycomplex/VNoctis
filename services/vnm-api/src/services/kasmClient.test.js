@@ -90,6 +90,19 @@ test('image override is honored and normalized', async () => {
   assert.equal(calls[0].body.image_id, '11111111222233334444555555555555');
 });
 
+test('session ops impersonate the owner by sending user_id', async () => {
+  const calls = [];
+  const c = client(calls);
+  await c.getSessionStatus('k1', { userId: 'ku' });
+  await c.stopSession('k1', { userId: 'ku' });
+  await c.destroySession('k1', { userId: 'ku', deletePending: true });
+  await c.joinSession('k1', { userId: 'ku' });
+  for (const call of calls) {
+    assert.equal(call.body.user_id, 'ku');
+    assert.equal(call.body.kasm_id, 'k1');
+  }
+});
+
 test('status/join/stop/destroy call the expected public endpoints with kasm_id', async () => {
   const calls = [];
   const c = client(calls);
@@ -104,16 +117,22 @@ test('status/join/stop/destroy call the expected public endpoints with kasm_id',
   assert.equal(calls[3].body.delete_pending, true);
 });
 
-test('update custom attributes uses user_id + target_user_attributes', async () => {
+test('setRuntimeTarget writes custom attributes via update_user/target_user', async () => {
   const calls = [];
-  await client(calls).setRuntimeTarget({ kasmUserId: 'kasm-user', appUserId: 'app-u', browserRuntimeId: 'rt-u' });
-  assert.equal(calls[0].url, 'https://holo/api/public/update_user_attributes');
+  await client(calls).setRuntimeTarget({ kasmUserId: 'kasm-user', kasmUsername: 'vnoctis-x', appUserId: 'app-u', browserRuntimeId: 'rt-u' });
+  assert.equal(calls[0].url, 'https://holo/api/public/update_user');
   assert.deepEqual(calls[0].body, {
     api_key: 'KEY123',
     api_key_secret: SECRET,
-    user_id: 'kasm-user',
-    target_user_attributes: { custom_attribute_1: 'app-u', custom_attribute_2: 'rt-u' },
+    target_user: { user_id: 'kasm-user', username: 'vnoctis-x', custom_attribute_1: 'app-u', custom_attribute_2: 'rt-u' },
   });
+});
+
+test('updateUserAttributes writes the UserAttributes row under target_user_attributes', async () => {
+  const calls = [];
+  await client(calls).updateUserAttributes({ userId: 'kasm-user', attributes: { preferred_language: 'en_US.UTF-8' } });
+  assert.equal(calls[0].url, 'https://holo/api/public/update_user_attributes');
+  assert.deepEqual(calls[0].body.target_user_attributes, { user_id: 'kasm-user', preferred_language: 'en_US.UTF-8' });
 });
 
 test('list users parsing finds by exact username (local filter)', async () => {
@@ -176,12 +195,16 @@ test('image lookup parsing matches hex or dashed ids', async () => {
   assert.equal(byName.image_id, IMAGE_HEX);
 });
 
-test('create user request shape', async () => {
+test('create user wraps the new user in target_user and parses the nested response', async () => {
   const calls = [];
-  await client(calls).createUser({ username: 'vnoctis-y' });
+  const c = client(calls, {
+    transport: async (req) => { calls.push(req); return { status: 200, json: { user: { user_id: 'ku-1', username: 'vnoctis-y' } } }; },
+  });
+  const created = await c.createUser({ username: 'vnoctis-y' });
   assert.equal(calls[0].url, 'https://holo/api/public/create_user');
-  assert.equal(calls[0].body.username, 'vnoctis-y');
+  assert.equal(calls[0].body.target_user.username, 'vnoctis-y');
   assert.equal(calls[0].body.api_key, 'KEY123');
+  assert.equal(created.user_id, 'ku-1');
 });
 
 test('getImages and getRecentKasms parse documented response envelopes', async () => {

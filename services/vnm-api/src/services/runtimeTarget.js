@@ -128,6 +128,24 @@ export function prismaSessionStore(prisma) {
         data: { state: 'ERROR', activeKey: null, endedAt: new Date() },
       });
     },
+    async getById(id) {
+      return prisma.browserSession.findUnique({ where: { id } });
+    },
+    async findActiveByUser(userId) {
+      return prisma.browserSession.findFirst({ where: { userId, activeKey: userId } });
+    },
+    /** Reconcile a live Kasm status onto the row; terminal states clear activeKey. */
+    async updateState(id, state) {
+      const terminal = state === 'ENDED' || state === 'ERROR';
+      return prisma.browserSession.update({
+        where: { id },
+        data: {
+          state,
+          lastSeenAt: new Date(),
+          ...(terminal ? { activeKey: null, endedAt: new Date() } : {}),
+        },
+      });
+    },
   };
 }
 
@@ -149,6 +167,7 @@ export async function launchBrowserSession({
   existingIdentity = {},
   persistIdentity = null,
   launchSelections = {},
+  imageId = null,
 } = {}) {
   if (!isUuid(userId)) throw new LaunchTargetError('INVALID_USER_ID', 'userId must be a UUID.');
   if (!isUuid(browserRuntimeId)) {
@@ -158,7 +177,7 @@ export async function launchBrowserSession({
 
   return lockRegistry.run(userId, async () => {
     const identity = await ensureKasmIdentity({ appUserId: userId, client, existing: existingIdentity });
-    if (identity.created && typeof persistIdentity === 'function') {
+    if (typeof persistIdentity === 'function' && identity.kasmUserId !== existingIdentity.kasmUserId) {
       await persistIdentity(identity);
     }
 
@@ -166,12 +185,14 @@ export async function launchBrowserSession({
     try {
       await client.setRuntimeTarget({
         kasmUserId: identity.kasmUserId,
+        kasmUsername: identity.kasmUsername,
         appUserId: userId,
         browserRuntimeId,
       });
       const request = await client.requestSession({
         userId: identity.kasmUserId,
         launchSelections,
+        imageId,
       });
       const kasmSessionId = request?.kasm_id ?? request?.kasm?.kasm_id ?? null;
       const started = store && session

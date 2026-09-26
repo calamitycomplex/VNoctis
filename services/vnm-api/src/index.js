@@ -21,6 +21,7 @@ import favoritesRoutes from './routes/favorites.js';
 import usersRoutes from './routes/users.js';
 import settingsRoutes from './routes/settings.js';
 import publishRoutes from './routes/publish.js';
+import browserSessionsRoutes from './routes/browserSessions.js';
 import { scanGamesDirectory } from './services/scanner.js';
 import { VNDBClient } from './services/vndbClient.js';
 import { SteamClient } from './services/steamClient.js';
@@ -232,6 +233,7 @@ await fastify.register(multipart, {
 // ── API routes (all prefixed under /api/v1) ───────────────
 await fastify.register(healthRoutes, { prefix: '/api/v1' });
 await fastify.register(libraryRoutes, { prefix: '/api/v1' });
+await fastify.register(browserSessionsRoutes, { prefix: '/api/v1' });
 await fastify.register(buildRoutes, { prefix: '/api/v1' });
 await fastify.register(metadataRoutes, { prefix: '/api/v1' });
 await fastify.register(coversRoutes, { prefix: '/api/v1' });

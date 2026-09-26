@@ -140,11 +140,21 @@ export function createKasmClient({
     const body = { ...auth(), ...payload };
     logger?.debug?.({ kasmPath: path }, 'kasm api call');
     let res;
-    try {
-      // Content-Type only — credentials travel in the JSON body.
-      res = await send({ method: 'POST', url, headers: { 'Content-Type': 'application/json' }, body });
-    } catch (err) {
-      const e = new Error(`Kasm API request to ${path} failed: ${err.message}`);
+    let lastErr;
+    // Bounded retry for transient transport hiccups (socket hang up, reset).
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        // Content-Type only — credentials travel in the JSON body.
+        res = await send({ method: 'POST', url, headers: { 'Content-Type': 'application/json' }, body });
+        lastErr = null;
+        break;
+      } catch (err) {
+        lastErr = err;
+        await new Promise((r) => setTimeout(r, 250 * (attempt + 1)));
+      }
+    }
+    if (lastErr) {
+      const e = new Error(`Kasm API request to ${path} failed: ${lastErr.message}`);
       e.code = 'KASM_TRANSPORT_ERROR';
       throw e;
     }
@@ -218,21 +228,40 @@ export function createKasmClient({
       return users.find((u) => u?.username === username) ?? null;
     },
 
-    /** Create a dedicated Kasm user. Custom attributes are set separately. */
-    createUser({ username, password = null, ...extra } = {}) {
-      const payload = { username, ...extra };
-      if (password) payload.password = password;
-      return request(p(`create_user`), payload);
+    /**
+     * Create a dedicated Kasm user.
+     *
+     * LIVE SHAPE (Kasm 1.19): the Developer API wraps the new user under
+     * `target_user`, and the response nests the created row under `user`.
+     */
+    async createUser({ username, password = null, customAttributes = null, ...extra } = {}) {
+      const targetUser = { username, ...extra };
+      if (password) targetUser.password = password;
+      if (customAttributes) Object.assign(targetUser, customAttributes);
+      const res = await request(p(`create_user`), { target_user: targetUser });
+      return res?.user ?? res;
     },
 
     /**
-     * Set arbitrary attributes on a Kasm user (e.g. custom_attribute_1/2).
-     * Body: `{ user_id, target_user_attributes: {...} }`.
+     * Update a Kasm user's own fields — this is the endpoint that writes
+     * `custom_attribute_1/2/3` onto the `users` table. `username` is required
+     * by the live handler.
+     *
+     * Body: `{ target_user: { user_id, username, ...fields } }`.
+     */
+    updateUser({ userId, username, attributes = {} }) {
+      return request(p(`update_user`), {
+        target_user: { user_id: userId, username, ...attributes },
+      });
+    },
+
+    /**
+     * Update the `UserAttributes` row (theme/locale/ssh/etc.).
+     * Body: `{ target_user_attributes: { user_id, ...attributes } }`.
      */
     updateUserAttributes({ userId, attributes }) {
       return request(p(`update_user_attributes`), {
-        user_id: userId,
-        target_user_attributes: attributes,
+        target_user_attributes: { user_id: userId, ...attributes },
       });
     },
 
@@ -244,9 +273,10 @@ export function createKasmClient({
      * use services/runtimeTarget.js `launchBrowserSession`, which sequences the
      * two calls under a per-user lock so concurrent launches cannot race.
      */
-    setRuntimeTarget({ kasmUserId, appUserId, browserRuntimeId }) {
-      return this.updateUserAttributes({
+    setRuntimeTarget({ kasmUserId, kasmUsername, appUserId, browserRuntimeId }) {
+      return this.updateUser({
         userId: kasmUserId,
+        username: kasmUsername,
         attributes: { custom_attribute_1: appUserId, custom_attribute_2: browserRuntimeId },
       });
     },
@@ -266,20 +296,37 @@ export function createKasmClient({
       return request(p(`request_kasm`), payload);
     },
 
-    getSessionStatus(kasmId) {
-      return request(p(`get_kasm_status`), { kasm_id: kasmId });
-    },
-
-    joinSession(kasmId) {
-      return request(p(`join_kasm`), { kasm_id: kasmId });
-    },
-
-    stopSession(kasmId) {
-      return request(p(`stop_kasm`), { kasm_id: kasmId });
-    },
-
-    destroySession(kasmId, { deletePending = false } = {}) {
+    /**
+     * Status of one kasm.
+     *
+     * LIVE NOTE: Developer API keys have no `authenticated_user`, so every
+     * session op MUST pass `user_id`; the Kasm auth layer impersonates that
+     * user, and the handler 403s unless the caller matches the session owner.
+     * Response: `{ kasm, operational_status, kasm_url, current_time }`.
+     */
+    getSessionStatus(kasmId, { userId = null } = {}) {
       const payload = { kasm_id: kasmId };
+      if (userId) payload.user_id = userId;
+      return request(p(`get_kasm_status`), payload);
+    },
+
+    joinSession(kasmId, { userId = null, shareId = null } = {}) {
+      const payload = {};
+      if (kasmId) payload.kasm_id = kasmId;
+      if (shareId) payload.share_id = shareId;
+      if (userId) payload.user_id = userId;
+      return request(p(`join_kasm`), payload);
+    },
+
+    stopSession(kasmId, { userId = null } = {}) {
+      const payload = { kasm_id: kasmId };
+      if (userId) payload.user_id = userId;
+      return request(p(`stop_kasm`), payload);
+    },
+
+    destroySession(kasmId, { userId = null, deletePending = false } = {}) {
+      const payload = { kasm_id: kasmId };
+      if (userId) payload.user_id = userId;
       if (deletePending) payload.delete_pending = true;
       return request(p(`destroy_kasm`), payload);
     },
