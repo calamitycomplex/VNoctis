@@ -138,6 +138,26 @@ export default function useTitleLibrary() {
     await fetchTitles({ silent: true });
   }, [fetchTitles]);
 
+  /** Request the logical Title's browser version (Title-level, no release pick). */
+  const requestWebVersion = useCallback(async (titleId) => {
+    try {
+      await api.post(`/library/titles/${titleId}/web-request`);
+    } catch {
+      // fall through to refetch so the UI reflects server truth
+    }
+    await fetchTitles({ silent: true });
+  }, [fetchTitles]);
+
+  /** Withdraw the current user's own browser-version request. */
+  const withdrawWebVersion = useCallback(async (titleId) => {
+    try {
+      await api.delete(`/library/titles/${titleId}/web-request`);
+    } catch {
+      // fall through to refetch
+    }
+    await fetchTitles({ silent: true });
+  }, [fetchTitles]);
+
   const sortBy = query.order === 'desc' ? 'name-desc' : 'name-asc';
 
   return {
@@ -151,6 +171,8 @@ export default function useTitleLibrary() {
     hideGame,
     unhideAll,
     favoriteGame,
+    requestWebVersion,
+    withdrawWebVersion,
 
     searchQuery: query.search,
     setSearchQuery,

@@ -1,13 +1,16 @@
 import { useState } from 'react';
 import { generateGradient, formatRating, getRatingColor, truncate } from '../lib/utils';
+import BrowserRuntimeBadge from './BrowserRuntimeBadge';
 import {
   archiveItemsOf,
+  browserRuntimeFor,
   cardFactsFor,
   cardTagsFor,
   coverUrlFor,
   displayTitleFor,
   logicalMetadataFor,
   originalTitleFor,
+  requestActionFor,
   singleGameFor,
 } from '../lib/titleDisplay';
 
@@ -20,7 +23,10 @@ import {
  * metadata with a single-Game compatibility fallback — multi-release Titles
  * never borrow one release's metadata.
  */
-export default function TitleCard({ title, onClick, onHide, onFavorite, isAdmin = true, r2Mode = false }) {
+export default function TitleCard({
+  title, onClick, onHide, onFavorite, isAdmin = true, r2Mode = false,
+  isAuthenticated = false, onRequestWebVersion, onWithdrawWebVersion,
+}) {
   const [hovered, setHovered] = useState(false);
 
   const items = archiveItemsOf(title);
@@ -43,6 +49,12 @@ export default function TitleCard({ title, onClick, onHide, onFavorite, isAdmin 
   // Runtime/favorite/hide controls only exist when a specific Game is unambiguous.
   const canAct = !!game && !isMulti;
   const availableSources = items.filter((item) => item.sourceAvailable).length;
+  // Browser-runtime workflow is Title-level and independent of source availability.
+  const runtime = browserRuntimeFor(title);
+  const requestAction = isAuthenticated ? requestActionFor(runtime) : null;
+  const runtimeHint = runtime.state === 'READY'
+    ? 'Browser runtime prepared — launch itself arrives in a later slice'
+    : undefined;
 
   const handleActivate = () => onClick?.(title);
   const handleKeyDown = (e) => {
@@ -269,6 +281,31 @@ export default function TitleCard({ title, onClick, onHide, onFavorite, isAdmin 
             {game.publishStatus === 'published' ? '● R2 Published' : '○ Not Published'}
           </span>
         )}
+
+        {/* Browser-runtime workflow — distinct from source availability */}
+        <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+          <BrowserRuntimeBadge state={runtime.state} title={runtimeHint} />
+          {requestAction === 'request' && onRequestWebVersion && (
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); onRequestWebVersion(title); }}
+              className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-blue-600 hover:bg-blue-500 text-white transition-colors"
+              aria-label={`Request a web version of ${name}`}
+            >
+              Request Web Version
+            </button>
+          )}
+          {requestAction === 'withdraw' && onWithdrawWebVersion && (
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); onWithdrawWebVersion(title); }}
+              className="px-1.5 py-0.5 rounded text-[10px] font-semibold text-blue-600 dark:text-blue-300 hover:bg-blue-500/10 transition-colors"
+              aria-label={`Withdraw web version request for ${name}`}
+            >
+              Withdraw
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Hover: synopsis + explicit details affordance (bottom gradient, top badges stay visible) */}

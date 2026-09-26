@@ -266,6 +266,7 @@ fastify.addHook('onRequest', async (request, reply) => {
       url === '/api/v1/library/unhide-all' ||
       (request.method === 'DELETE' && /^\/api\/v1\/library\/[^/]+$/.test(url)) ||
       (request.method === 'PATCH' && /^\/api\/v1\/library\/[^/]+$/.test(url)) ||
+      /^\/api\/v1\/library\/titles\/[^/]+\/runtime$/.test(url) ||
       /^\/api\/v1\/library\/[^/]+\/mark-playable$/.test(url) ||
       (request.method === 'POST' && /^\/api\/v1\/build\/[^/]+$/.test(url) && !url.includes('/log')) ||
       (request.method === 'DELETE' && /^\/api\/v1\/build\/[^/]+$/.test(url)) ||

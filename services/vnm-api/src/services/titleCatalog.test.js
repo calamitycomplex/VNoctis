@@ -39,7 +39,55 @@ test('serializeTitle uses Title identity and aggregates availability from items'
   assert.equal(dto.archiveItems.length, 1);
   assert.equal(dto.archiveItems[0].directoryName, 'Dir');
   assert.equal(dto.archiveItems[0].game.id, 'g'.repeat(32));
-  assert.deepEqual(Object.keys(dto).sort(), ['archiveItems', 'createdAt', 'id', 'metadata', 'name', 'sourceAvailable', 'updatedAt']);
+  assert.deepEqual(Object.keys(dto).sort(), ['archiveItems', 'browserRuntime', 'createdAt', 'id', 'metadata', 'name', 'sourceAvailable', 'updatedAt']);
+});
+
+test('serializeTitle exposes ARCHIVE_ONLY by default with no runtime row or requests', () => {
+  const dto = serializeTitle(title());
+  assert.deepEqual(dto.browserRuntime, {
+    state: 'ARCHIVE_ONLY',
+    archiveItemId: null,
+    note: null,
+    createdAt: null,
+    updatedAt: null,
+    requestCount: 0,
+    requestedByCurrentUser: false,
+  });
+});
+
+test('serializeTitle exposes runtime state, selected release, and per-user request scope', () => {
+  const runtime = {
+    state: 'PREPARING',
+    archiveItemId: 'item-2',
+    note: 'using release B',
+    createdAt: new Date('2025-01-01'),
+    updatedAt: new Date('2025-01-02'),
+  };
+  const webRequests = [{ userId: 'user-a' }, { userId: 'user-b' }];
+
+  const asRequester = serializeTitle(title({ browserRuntime: runtime, webRequests }), undefined, 'user-a');
+  assert.equal(asRequester.browserRuntime.state, 'PREPARING');
+  assert.equal(asRequester.browserRuntime.archiveItemId, 'item-2');
+  assert.equal(asRequester.browserRuntime.requestCount, 2);
+  assert.equal(asRequester.browserRuntime.requestedByCurrentUser, true);
+
+  const asOther = serializeTitle(title({ browserRuntime: runtime, webRequests }), undefined, 'user-c');
+  assert.equal(asOther.browserRuntime.requestCount, 2);
+  assert.equal(asOther.browserRuntime.requestedByCurrentUser, false);
+
+  // No caller identity (anonymous read) still sees a count, never identities.
+  const anon = serializeTitle(title({ browserRuntime: { state: 'READY' }, webRequests }));
+  assert.equal(anon.browserRuntime.state, 'READY');
+  assert.equal(anon.browserRuntime.requestedByCurrentUser, false);
+});
+
+test('sourceAvailable stays independent of browser-runtime state', () => {
+  const dto = serializeTitle(title({
+    archiveItems: [item({ sourceAvailable: false })],
+    browserRuntime: { state: 'READY' },
+  }));
+  assert.equal(dto.sourceAvailable, false);
+  assert.equal(dto.browserRuntime.state, 'READY');
 });
 
 test('serializeTitle exposes an authoritative metadata block with parsed arrays', () => {

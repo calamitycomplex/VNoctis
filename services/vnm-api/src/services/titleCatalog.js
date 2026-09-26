@@ -6,6 +6,8 @@
  * ArchiveItem. This module only shapes reads — no writes, no filesystem access.
  */
 
+import { serializeBrowserRuntime } from './browserRuntime.js';
+
 /** Default and maximum page sizes for the Title list endpoint. */
 export const DEFAULT_PAGE_SIZE = 50;
 export const MAX_PAGE_SIZE = 100;
@@ -75,6 +77,16 @@ export const TITLE_SELECT = {
     },
     orderBy: [{ directoryName: 'asc' }, { id: 'asc' }],
   },
+  browserRuntime: {
+    select: {
+      state: true,
+      archiveItemId: true,
+      note: true,
+      createdAt: true,
+      updatedAt: true,
+    },
+  },
+  webRequests: { select: { userId: true } },
 };
 
 function safeJsonParse(value, fallback) {
@@ -116,7 +128,7 @@ export function serializeArchiveItem(item, favoriteGameIds) {
  * Title.sourceAvailable is aggregated: true when AT LEAST ONE ArchiveItem is
  * available, false only when NONE are. No ArchiveItem is treated as primary.
  */
-export function serializeTitle(title, favoriteGameIds) {
+export function serializeTitle(title, favoriteGameIds, currentUserId = null) {
   const archiveItems = title.archiveItems.map((item) => serializeArchiveItem(item, favoriteGameIds));
   return {
     id: title.id,
@@ -125,6 +137,7 @@ export function serializeTitle(title, favoriteGameIds) {
     updatedAt: title.updatedAt,
     sourceAvailable: archiveItems.some((item) => item.sourceAvailable),
     metadata: serializeTitleMetadata(title),
+    browserRuntime: serializeBrowserRuntime(title.browserRuntime, title.webRequests, currentUserId),
     archiveItems,
   };
 }

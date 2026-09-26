@@ -33,7 +33,7 @@ const NO_TAGS = new Set();
  * TitleDetailModal with an explicit per-release list.
  */
 export default function Library({ r2Mode = false }) {
-  const { isAdmin } = useAuth();
+  const { isAdmin, isAuthenticated } = useAuth();
   const {
     titles,
     pagination,
@@ -45,6 +45,8 @@ export default function Library({ r2Mode = false }) {
     hideGame,
     unhideAll,
     favoriteGame,
+    requestWebVersion,
+    withdrawWebVersion,
     searchQuery,
     setSearchQuery,
     sourceAvailableFilter,
@@ -103,6 +105,14 @@ export default function Library({ r2Mode = false }) {
     const game = singleGameFor(title);
     if (game) hideGame(game.id, !game.hidden);
   }, [hideGame]);
+
+  const handleRequestWebVersion = useCallback((title) => {
+    requestWebVersion(title.id);
+  }, [requestWebVersion]);
+
+  const handleWithdrawWebVersion = useCallback((title) => {
+    withdrawWebVersion(title.id);
+  }, [withdrawWebVersion]);
 
   const handleToggleItemFavorite = useCallback((gameId, favorite) => {
     favoriteGame(gameId, favorite);
@@ -317,6 +327,9 @@ export default function Library({ r2Mode = false }) {
                 onFavorite={handleFavorite}
                 isAdmin={isAdmin}
                 r2Mode={r2Mode}
+                isAuthenticated={isAuthenticated}
+                onRequestWebVersion={handleRequestWebVersion}
+                onWithdrawWebVersion={handleWithdrawWebVersion}
               />
             ))}
           </div>
@@ -381,6 +394,7 @@ export default function Library({ r2Mode = false }) {
         onToggleFavorite={handleToggleItemFavorite}
         isAdmin={isAdmin}
         r2Mode={r2Mode}
+        isAuthenticated={isAuthenticated}
       />
     )}
 

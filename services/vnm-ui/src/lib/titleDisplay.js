@@ -218,3 +218,74 @@ export function isMultiRelease(title) {
 export function hasRuntimeActions(title) {
   return singleGameFor(title) !== null;
 }
+
+// ── Browser-runtime workflow (state/workflow only; no Kasm yet) ─────────────
+
+/** Every browser-runtime state, including the derived ARCHIVE_ONLY absence. */
+export const RUNTIME_STATES = [
+  'ARCHIVE_ONLY',
+  'REQUESTED',
+  'PREPARING',
+  'TESTING',
+  'READY',
+  'BROKEN',
+  'UNSUPPORTED',
+];
+
+/** Mirrors the backend transition table (see services/vnm-api browserRuntime.js). */
+export const RUNTIME_TRANSITIONS = {
+  ARCHIVE_ONLY: ['REQUESTED', 'PREPARING'],
+  REQUESTED: ['PREPARING', 'UNSUPPORTED'],
+  PREPARING: ['TESTING', 'BROKEN'],
+  TESTING: ['READY', 'BROKEN'],
+  READY: [],
+  BROKEN: ['PREPARING'],
+  UNSUPPORTED: ['REQUESTED', 'PREPARING'],
+};
+
+const RUNTIME_LABELS = {
+  ARCHIVE_ONLY: 'Archive only',
+  REQUESTED: 'Requested',
+  PREPARING: 'Preparing',
+  TESTING: 'Testing',
+  READY: 'Browser ready',
+  BROKEN: 'Broken',
+  UNSUPPORTED: 'Unsupported',
+};
+
+/** Human label for a browser-runtime state; unknown values fall back safely. */
+export function runtimeStateLabel(state) {
+  return RUNTIME_LABELS[state] || RUNTIME_LABELS.ARCHIVE_ONLY;
+}
+
+/** Allowed next admin states from `state` (ARCHIVE_ONLY when absent). */
+export function nextRuntimeStates(state) {
+  return RUNTIME_TRANSITIONS[state || 'ARCHIVE_ONLY'] ?? [];
+}
+
+/**
+ * Normalize the browser-runtime block of a Title DTO.
+ * A Title with no runtime row and no request is ARCHIVE_ONLY.
+ */
+export function browserRuntimeFor(title) {
+  const runtime = title?.browserRuntime ?? {};
+  return {
+    state: runtime.state || 'ARCHIVE_ONLY',
+    archiveItemId: runtime.archiveItemId ?? null,
+    note: runtime.note ?? null,
+    requestCount: runtime.requestCount ?? 0,
+    requestedByCurrentUser: !!runtime.requestedByCurrentUser,
+  };
+}
+
+/**
+ * Which request action the current user should see, or null for none.
+ * `'request'` on ARCHIVE_ONLY, `'withdraw'` when this user already requested.
+ * READY/PREPARING/TESTING/etc. show status only — no fake launch yet.
+ */
+export function requestActionFor(runtime) {
+  if (!runtime) return 'request';
+  if (runtime.state === 'ARCHIVE_ONLY') return 'request';
+  if (runtime.state === 'REQUESTED' && runtime.requestedByCurrentUser) return 'withdraw';
+  return null;
+}

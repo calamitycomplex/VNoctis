@@ -1,16 +1,21 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import api from '../hooks/useApi';
 import ScreenshotLightbox from './ScreenshotLightbox';
+import BrowserRuntimeBadge from './BrowserRuntimeBadge';
 import { generateGradient, formatRating, getBuildStatusBadge } from '../lib/utils';
 import {
   archiveItemsOf,
+  browserRuntimeFor,
   coverUrlFor,
   detailFactsFor,
   detailTagsFor,
   displayTitleFor,
   isMultiRelease,
   logicalMetadataFor,
+  nextRuntimeStates,
   originalTitleFor,
+  requestActionFor,
+  runtimeStateLabel,
   screenshotUrlsFor,
 } from '../lib/titleDisplay';
 
@@ -23,23 +28,37 @@ import {
  * primary). Used for multi-release and game-less Titles; single-release Titles
  * still open GameDetailModal via the Library.
  */
-export default function TitleDetailModal({ title: initialTitle, onClose, onOpenGame, onToggleFavorite, isAdmin = true, r2Mode = false }) {
+export default function TitleDetailModal({
+  title: initialTitle, onClose, onOpenGame, onToggleFavorite,
+  isAdmin = true, r2Mode = false, isAuthenticated = false,
+}) {
   const [title, setTitle] = useState(initialTitle);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [lightboxIndex, setLightboxIndex] = useState(null);
+  const [runtimeBusy, setRuntimeBusy] = useState(false);
+  const [runtimeError, setRuntimeError] = useState(null);
+  const [adminTargetState, setAdminTargetState] = useState('');
+  const [adminItemId, setAdminItemId] = useState('');
+  const [adminNote, setAdminNote] = useState('');
   const modalRef = useRef(null);
+
+  const loadTitle = useCallback(async () => {
+    const data = await api.get(`/library/titles/${initialTitle.id}`);
+    setTitle(data);
+    return data;
+  }, [initialTitle.id]);
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     setError(null);
-    api.get(`/library/titles/${initialTitle.id}`)
+    loadTitle()
       .then((data) => { if (!cancelled) setTitle(data); })
       .catch((err) => { if (!cancelled) setError(err.message || 'Failed to load title details'); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [initialTitle.id]);
+  }, [loadTitle]);
 
   // Scroll lock + Escape/focus handling, matching GameDetailModal.
   useEffect(() => {
@@ -78,6 +97,64 @@ export default function TitleDetailModal({ title: initialTitle, onClose, onOpenG
   const gradient = generateGradient(name);
   // Title-owned cover URL when resolvable; never picks a primary Game.
   const coverUrl = coverUrlFor(title);
+
+  // Browser-runtime workflow is Title-level and independent of source availability.
+  const runtime = browserRuntimeFor(title);
+  const requestAction = isAuthenticated ? requestActionFor(runtime) : null;
+  const allowedNextStates = nextRuntimeStates(runtime.state);
+  const selectedRelease = items.find((item) => item.id === runtime.archiveItemId) || null;
+
+  // Keep the admin target in sync with the current state after every change.
+  useEffect(() => {
+    setAdminTargetState(nextRuntimeStates(runtime.state)[0] ?? runtime.state);
+    setAdminItemId(runtime.archiveItemId ?? '');
+    setAdminNote('');
+  }, [title.id, runtime.state, runtime.archiveItemId]);
+
+  const applyRuntimeResponse = (response) =>
+    setTitle((prev) => ({ ...prev, browserRuntime: response.browserRuntime }));
+
+  const handleRequestWebVersion = async () => {
+    setRuntimeBusy(true);
+    setRuntimeError(null);
+    try {
+      const response = await api.post(`/library/titles/${title.id}/web-request`);
+      applyRuntimeResponse(response);
+    } catch (err) {
+      setRuntimeError(err.message || 'Failed to request web version');
+    } finally {
+      setRuntimeBusy(false);
+    }
+  };
+
+  const handleWithdrawWebVersion = async () => {
+    setRuntimeBusy(true);
+    setRuntimeError(null);
+    try {
+      const response = await api.delete(`/library/titles/${title.id}/web-request`);
+      applyRuntimeResponse(response);
+    } catch (err) {
+      setRuntimeError(err.message || 'Failed to withdraw request');
+    } finally {
+      setRuntimeBusy(false);
+    }
+  };
+
+  const handleAdminApply = async () => {
+    if (!adminTargetState) return;
+    setRuntimeBusy(true);
+    setRuntimeError(null);
+    try {
+      const payload = { state: adminTargetState, archiveItemId: adminItemId || null };
+      if (adminNote.trim()) payload.note = adminNote.trim();
+      const response = await api.patch(`/library/titles/${title.id}/runtime`, payload);
+      applyRuntimeResponse(response);
+    } catch (err) {
+      setRuntimeError(err.message || 'Failed to update runtime state');
+    } finally {
+      setRuntimeBusy(false);
+    }
+  };
 
   const factItems = [];
   if (facts.rating != null) {
@@ -234,6 +311,134 @@ export default function TitleDetailModal({ title: initialTitle, onClose, onOpenG
 
             {/* BODY */}
             <div className="px-6 py-5 space-y-6">
+              {/* Browser Play — Title-level workflow (no Kasm launch yet) */}
+              <section>
+                <h3 className="text-xs font-bold uppercase tracking-widest text-gray-500 dark:text-gray-400 mb-2">
+                  Browser Play
+                </h3>
+                <div className="rounded-lg border border-gray-200 dark:border-gray-700/50 p-3 space-y-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <BrowserRuntimeBadge state={runtime.state} className="!text-[11px]" title={runtime.state === 'READY' ? 'Prepared — launch arrives in a later slice' : undefined} />
+                    {runtime.state === 'READY' && (
+                      <span className="text-xs text-gray-500 dark:text-gray-400">
+                        Runtime prepared — launching arrives in a later slice.
+                      </span>
+                    )}
+                    {runtime.state === 'ARCHIVE_ONLY' && (
+                      <span className="text-xs text-gray-500 dark:text-gray-400">No browser runtime prepared yet.</span>
+                    )}
+                    {runtime.state === 'UNSUPPORTED' && (
+                      <span className="text-xs text-gray-500 dark:text-gray-400">
+                        Marked unsupported — an admin must reopen it before requests are accepted.
+                      </span>
+                    )}
+                  </div>
+
+                  {selectedRelease && (
+                    <p className="text-xs text-gray-500 dark:text-gray-400">
+                      Selected release:{' '}
+                      <span className="font-medium text-gray-700 dark:text-gray-200">{selectedRelease.directoryName}</span>
+                      {!selectedRelease.sourceAvailable && (
+                        <span className="ml-2 font-medium text-amber-600 dark:text-amber-400">source now unavailable</span>
+                      )}
+                    </p>
+                  )}
+
+                  {requestAction === 'request' && (
+                    <button
+                      type="button"
+                      onClick={handleRequestWebVersion}
+                      disabled={runtimeBusy}
+                      className="px-3 py-1.5 text-xs font-semibold bg-blue-600 hover:bg-blue-500 text-white rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      Request Web Version
+                    </button>
+                  )}
+                  {requestAction === 'withdraw' && (
+                    <div className="flex flex-wrap items-center gap-3">
+                      <span className="text-xs text-gray-500 dark:text-gray-400">Requested by you</span>
+                      <button
+                        type="button"
+                        onClick={handleWithdrawWebVersion}
+                        disabled={runtimeBusy}
+                        className="px-3 py-1.5 text-xs font-semibold text-blue-600 dark:text-blue-300 hover:bg-blue-500/10 rounded-lg transition-colors disabled:opacity-50"
+                      >
+                        Withdraw request
+                      </button>
+                    </div>
+                  )}
+                  {!isAuthenticated && runtime.state === 'ARCHIVE_ONLY' && (
+                    <p className="text-xs text-gray-500 dark:text-gray-400">Sign in to request a browser version.</p>
+                  )}
+                  {runtime.requestCount > 1 && (
+                    <p className="text-xs text-gray-500 dark:text-gray-400">{runtime.requestCount} users have requested this title.</p>
+                  )}
+                  {runtime.note && (
+                    <p className="text-xs text-gray-500 dark:text-gray-400">Note: {runtime.note}</p>
+                  )}
+                  {runtimeError && <p className="text-xs text-red-500">{runtimeError}</p>}
+
+                  {isAdmin && (
+                    <div className="mt-2 pt-2 border-t border-gray-200 dark:border-gray-700/50 space-y-2">
+                      <p className="text-[11px] font-semibold uppercase tracking-wider text-gray-400 dark:text-gray-500">
+                        Admin workflow
+                      </p>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <select
+                          value={adminTargetState}
+                          onChange={(e) => setAdminTargetState(e.target.value)}
+                          disabled={runtimeBusy}
+                          aria-label="Target runtime state"
+                          className="px-2 py-1 text-xs rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-200"
+                        >
+                          {[...new Set([runtime.state, ...allowedNextStates])].map((state) => (
+                            <option key={state} value={state}>{runtimeStateLabel(state)}</option>
+                          ))}
+                        </select>
+                        <select
+                          value={adminItemId}
+                          onChange={(e) => setAdminItemId(e.target.value)}
+                          disabled={runtimeBusy}
+                          aria-label="Release to prepare"
+                          className="px-2 py-1 text-xs rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-200 max-w-[16rem]"
+                        >
+                          <option value="">No release selected</option>
+                          {items.map((item) => (
+                            <option
+                              key={item.id}
+                              value={item.id}
+                              disabled={adminTargetState === 'PREPARING' && !item.sourceAvailable}
+                            >
+                              {item.directoryName}{item.sourceAvailable ? '' : ' (unavailable)'}
+                            </option>
+                          ))}
+                        </select>
+                        <input
+                          value={adminNote}
+                          onChange={(e) => setAdminNote(e.target.value)}
+                          placeholder="Note (optional)"
+                          aria-label="Runtime note"
+                          className="px-2 py-1 text-xs rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-200 max-w-[14rem]"
+                        />
+                        <button
+                          type="button"
+                          onClick={handleAdminApply}
+                          disabled={runtimeBusy || !adminTargetState}
+                          className="px-3 py-1.5 text-xs font-semibold bg-blue-600 hover:bg-blue-500 text-white rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          Apply
+                        </button>
+                      </div>
+                      {allowedNextStates.length === 0 && (
+                        <p className="text-[11px] text-gray-400 dark:text-gray-500">
+                          READY is terminal for this prototype.
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </section>
+
               {meta.synopsis && (
                 <section>
                   <h3 className="text-xs font-bold uppercase tracking-widest text-gray-500 dark:text-gray-400 mb-2">
@@ -319,6 +524,11 @@ export default function TitleDetailModal({ title: initialTitle, onClose, onOpenG
                               {buildBadge && (
                                 <span className={`px-2 py-0.5 rounded text-[11px] font-medium ${buildBadge.colorClass}`}>
                                   {buildBadge.label}
+                                </span>
+                              )}
+                              {runtime.archiveItemId === item.id && (
+                                <span className="px-2 py-0.5 rounded text-[11px] font-semibold bg-blue-500/20 text-blue-500 dark:text-blue-300">
+                                  Runtime release
                                 </span>
                               )}
                               {game?.hidden && (

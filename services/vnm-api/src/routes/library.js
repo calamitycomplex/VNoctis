@@ -15,6 +15,12 @@ import {
   buildTitleWhere,
   serializeTitle,
 } from '../services/titleCatalog.js';
+import {
+  canTransition,
+  isStoredRuntimeState,
+  normalizeRuntimeState,
+  serializeBrowserRuntime,
+} from '../services/browserRuntime.js';
 
 /**
  * Parse JSON string fields (tags, screenshots) on a game object.
@@ -177,6 +183,37 @@ export default async function libraryRoutes(fastify) {
   const TITLE_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
   /**
+   * Build the browser-runtime response block for a Title. Read-only; used by
+   * the request/withdraw/runtime endpoints so every response carries the same
+   * shape as the Title DTO's `browserRuntime`.
+   */
+  async function runtimeBlockFor(titleId, userId) {
+    const [runtime, requests] = await Promise.all([
+      fastify.prisma.browserRuntime.findUnique({ where: { titleId } }),
+      fastify.prisma.webRequest.findMany({ where: { titleId }, select: { userId: true } }),
+    ]);
+    return serializeBrowserRuntime(runtime, requests, userId);
+  }
+
+  /** 400/404 gate shared by the Title runtime endpoints. */
+  async function loadTitleOrFail(titleId, reply) {
+    if (!TITLE_UUID.test(titleId)) {
+      reply.code(400).send({
+        error: { code: 'INVALID_TITLE_ID', message: 'titleId must be a UUID.' },
+      });
+      return null;
+    }
+    const title = await fastify.prisma.title.findUnique({ where: { id: titleId }, select: { id: true } });
+    if (!title) {
+      reply.code(404).send({
+        error: { code: 'TITLE_NOT_FOUND', message: `Title with id "${titleId}" not found.` },
+      });
+      return null;
+    }
+    return title;
+  }
+
+  /**
    * GET /library/titles
    * Title-centric paginated catalog read. Compatibility: /library and
    * /library/:gameId remain Game-centric and unchanged.
@@ -225,7 +262,7 @@ export default async function libraryRoutes(fastify) {
     const favoriteGameIds = await loadFavoriteGameIds(fastify.prisma, request.user?.userId, titles);
 
     return {
-      items: titles.map((title) => serializeTitle(title, favoriteGameIds)),
+      items: titles.map((title) => serializeTitle(title, favoriteGameIds, request.user?.userId)),
       pagination: {
         page: pagination.page,
         pageSize: pagination.pageSize,
@@ -260,7 +297,7 @@ export default async function libraryRoutes(fastify) {
     }
 
     const favoriteGameIds = await loadFavoriteGameIds(fastify.prisma, request.user?.userId, [title]);
-    return serializeTitle(title, favoriteGameIds);
+    return serializeTitle(title, favoriteGameIds, request.user?.userId);
   });
 
   /**
@@ -330,7 +367,159 @@ export default async function libraryRoutes(fastify) {
 
     const full = await fastify.prisma.title.findUnique({ where: { id: titleId }, select: TITLE_SELECT });
     const favoriteGameIds = await loadFavoriteGameIds(fastify.prisma, request.user?.userId, [full]);
-    return serializeTitle(full, favoriteGameIds);
+    return serializeTitle(full, favoriteGameIds, request.user?.userId);
+  });
+
+  /**
+   * POST /library/titles/:titleId/web-request
+   * Authenticated user requests a browser version of the logical Title.
+   * Idempotent: one active request per (Title, User). Does not pick a release;
+   * an admin chooses which ArchiveItem to prepare later.
+   *
+   * An UNSUPPORTED runtime is an admin verdict: a normal user request must not
+   * reopen it. The caller gets 409 RUNTIME_UNSUPPORTED and no request row is
+   * written. Only the admin runtime PATCH can move UNSUPPORTED onward.
+   */
+  fastify.post('/library/titles/:titleId/web-request', async (request, reply) => {
+    const { titleId } = request.params;
+    const userId = request.user?.userId;
+    if (!userId) {
+      return reply.code(401).send({ error: { code: 'UNAUTHORIZED', message: 'Authentication required.' } });
+    }
+
+    const title = await loadTitleOrFail(titleId, reply);
+    if (!title) return;
+
+    const existing = await fastify.prisma.browserRuntime.findUnique({ where: { titleId } });
+    if (existing?.state === 'UNSUPPORTED') {
+      return reply.code(409).send({
+        error: {
+          code: 'RUNTIME_UNSUPPORTED',
+          message: 'This title is currently marked unsupported; an admin must reopen the workflow before requests can be accepted.',
+        },
+      });
+    }
+
+    await fastify.prisma.webRequest.upsert({
+      where: { titleId_userId: { titleId, userId } },
+      create: { titleId, userId },
+      update: {},
+    });
+
+    // A first request creates the runtime at REQUESTED; any other existing
+    // state (REQUESTED/PREPARING/TESTING/READY/BROKEN) is left untouched.
+    if (!existing) {
+      await fastify.prisma.browserRuntime.create({ data: { titleId, state: 'REQUESTED' } });
+    }
+
+    return { titleId, browserRuntime: await runtimeBlockFor(titleId, userId) };
+  });
+
+  /**
+   * DELETE /library/titles/:titleId/web-request
+   * Withdraw the caller's own request. Idempotent. Runtime/admin history is
+   * deliberately retained, so the displayed state does not silently revert.
+   */
+  fastify.delete('/library/titles/:titleId/web-request', async (request, reply) => {
+    const { titleId } = request.params;
+    const userId = request.user?.userId;
+    if (!userId) {
+      return reply.code(401).send({ error: { code: 'UNAUTHORIZED', message: 'Authentication required.' } });
+    }
+
+    const title = await loadTitleOrFail(titleId, reply);
+    if (!title) return;
+
+    await fastify.prisma.webRequest.deleteMany({ where: { titleId, userId } });
+    return { titleId, browserRuntime: await runtimeBlockFor(titleId, userId) };
+  });
+
+  /**
+   * PATCH /library/titles/:titleId/runtime
+   * Admin-only browser-runtime workflow transition. Validates the state, the
+   * transition, and (when supplied) that the ArchiveItem belongs to the Title.
+   * Selecting an unavailable release is rejected when entering PREPARING.
+   * No Docker/Kasm calls and no filesystem writes.
+   */
+  fastify.patch('/library/titles/:titleId/runtime', async (request, reply) => {
+    const { titleId } = request.params;
+
+    if (request.user?.role !== 'admin') {
+      return reply.code(403).send({ error: { code: 'FORBIDDEN', message: 'Admin access required.' } });
+    }
+
+    const title = await loadTitleOrFail(titleId, reply);
+    if (!title) return;
+
+    const body = request.body;
+    if (!body || typeof body !== 'object') {
+      return reply.code(400).send({ error: { code: 'INVALID_BODY', message: 'Request body must be an object.' } });
+    }
+
+    const { state, archiveItemId, note } = body;
+    if (typeof state !== 'string' || !isStoredRuntimeState(state)) {
+      return reply.code(400).send({
+        error: {
+          code: 'INVALID_STATE',
+          message: `state must be one of ${['REQUESTED', 'PREPARING', 'TESTING', 'READY', 'BROKEN', 'UNSUPPORTED'].join(', ')}.`,
+        },
+      });
+    }
+
+    const runtime = await fastify.prisma.browserRuntime.findUnique({ where: { titleId } });
+    const currentState = normalizeRuntimeState(runtime?.state);
+    if (!canTransition(currentState, state)) {
+      return reply.code(400).send({
+        error: {
+          code: 'INVALID_TRANSITION',
+          message: `Cannot transition from ${currentState} to ${state}.`,
+          from: currentState,
+          to: state,
+        },
+      });
+    }
+
+    let selectedArchiveItemId = runtime?.archiveItemId ?? null;
+    if (archiveItemId !== undefined && archiveItemId !== null) {
+      if (typeof archiveItemId !== 'string' || !TITLE_UUID.test(archiveItemId)) {
+        return reply.code(400).send({
+          error: { code: 'INVALID_ARCHIVE_ITEM_ID', message: 'archiveItemId must be a UUID.' },
+        });
+      }
+      const item = await fastify.prisma.archiveItem.findUnique({
+        where: { id: archiveItemId },
+        select: { id: true, titleId: true, sourceAvailable: true },
+      });
+      if (!item) {
+        return reply.code(404).send({
+          error: { code: 'ARCHIVE_ITEM_NOT_FOUND', message: `ArchiveItem with id "${archiveItemId}" not found.` },
+        });
+      }
+      if (item.titleId !== titleId) {
+        return reply.code(400).send({
+          error: { code: 'ARCHIVE_ITEM_MISMATCH', message: 'ArchiveItem does not belong to this Title.' },
+        });
+      }
+      if (state === 'PREPARING' && !item.sourceAvailable) {
+        return reply.code(400).send({
+          error: { code: 'ARCHIVE_ITEM_UNAVAILABLE', message: 'Cannot prepare an unavailable archive source.' },
+        });
+      }
+      selectedArchiveItemId = item.id;
+    } else if (archiveItemId === null) {
+      selectedArchiveItemId = null;
+    }
+
+    const data = { state, archiveItemId: selectedArchiveItemId };
+    if (note !== undefined) data.note = note === null ? null : String(note);
+
+    await fastify.prisma.browserRuntime.upsert({
+      where: { titleId },
+      create: { titleId, ...data },
+      update: data,
+    });
+
+    return { titleId, browserRuntime: await runtimeBlockFor(titleId, request.user?.userId) };
   });
 
   /**

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   archiveItemsOf,
+  browserRuntimeFor,
   cardFactsFor,
   cardTagsFor,
   coverUrlFor,
@@ -16,6 +17,9 @@ import {
   pickCoverGame,
   screenshotUrlsFor,
   singleGameFor,
+  runtimeStateLabel,
+  requestActionFor,
+  nextRuntimeStates,
 } from './titleDisplay.js';
 
 const item = (overrides = {}) => ({
@@ -251,4 +255,76 @@ test('detail helpers are safe for a game:null Title', () => {
   const archiveOnly = title({ metadata: { vndbTitle: 'Archive Only', developer: 'D' }, archiveItems: [item({ game: null })] });
   assert.equal(detailFactsFor(archiveOnly).developer, 'D');
   assert.deepEqual(detailTagsFor(archiveOnly), []);
+});
+
+// ── Browser-runtime workflow ───────────────────────────────────────────────
+
+test('Q. runtimeStateLabel maps every state to a human label', () => {
+  const expected = {
+    ARCHIVE_ONLY: 'Archive only',
+    REQUESTED: 'Requested',
+    PREPARING: 'Preparing',
+    TESTING: 'Testing',
+    READY: 'Browser ready',
+    BROKEN: 'Broken',
+    UNSUPPORTED: 'Unsupported',
+  };
+  for (const [state, label] of Object.entries(expected)) assert.equal(runtimeStateLabel(state), label);
+  assert.equal(runtimeStateLabel(undefined), 'Archive only');
+  assert.equal(runtimeStateLabel('WHATEVER'), 'Archive only');
+});
+
+test('R/S/U. requestActionFor drives request/withdraw visibility and is Title-level', () => {
+  assert.equal(requestActionFor(undefined), 'request');
+  assert.equal(requestActionFor(browserRuntimeFor(title({}))), 'request');
+
+  const requestedByMe = browserRuntimeFor(title({ browserRuntime: { state: 'REQUESTED', requestedByCurrentUser: true } }));
+  assert.equal(requestActionFor(requestedByMe), 'withdraw');
+
+  const requestedByOther = browserRuntimeFor(title({ browserRuntime: { state: 'REQUESTED', requestedByCurrentUser: false } }));
+  assert.equal(requestActionFor(requestedByOther), null);
+
+  assert.equal(requestActionFor(browserRuntimeFor(title({ browserRuntime: { state: 'PREPARING' } }))), null);
+});
+
+test('UNSUPPORTED exposes no user request action, but admin reopen targets remain', () => {
+  const runtime = browserRuntimeFor(title({ browserRuntime: { state: 'UNSUPPORTED', requestedByCurrentUser: true } }));
+  assert.equal(runtime.state, 'UNSUPPORTED');
+  assert.equal(runtimeStateLabel(runtime.state), 'Unsupported');
+  assert.equal(requestActionFor(runtime), null, 'a user request must not imply it can reopen');
+  assert.deepEqual(nextRuntimeStates('UNSUPPORTED'), ['REQUESTED', 'PREPARING']);
+});
+
+test('T. READY exposes a Browser ready state with no request action', () => {
+  const runtime = browserRuntimeFor(title({ browserRuntime: { state: 'READY', requestedByCurrentUser: true } }));
+  assert.equal(runtime.state, 'READY');
+  assert.equal(runtimeStateLabel(runtime.state), 'Browser ready');
+  assert.equal(requestActionFor(runtime), null);
+});
+
+test('U. multi-release runtime state is read from the Title, never a nested Game', () => {
+  const t = title({
+    browserRuntime: { state: 'PREPARING', archiveItemId: 'item-2', requestedByCurrentUser: true },
+    archiveItems: [item({ game: { id: 'g1' } }), item({ id: 'item-2', game: { id: 'g2' } })],
+  });
+  const runtime = browserRuntimeFor(t);
+  assert.equal(runtime.state, 'PREPARING');
+  assert.equal(runtime.archiveItemId, 'item-2');
+  assert.equal(runtime.requestedByCurrentUser, true);
+});
+
+test('nextRuntimeStates mirrors the backend transition table', () => {
+  assert.deepEqual(nextRuntimeStates(undefined), ['REQUESTED', 'PREPARING']);
+  assert.deepEqual(nextRuntimeStates('TESTING'), ['READY', 'BROKEN']);
+  assert.deepEqual(nextRuntimeStates('READY'), []);
+});
+
+test('browserRuntimeFor defaults missing fields safely', () => {
+  assert.deepEqual(browserRuntimeFor({}), {
+    state: 'ARCHIVE_ONLY',
+    archiveItemId: null,
+    note: null,
+    requestCount: 0,
+    requestedByCurrentUser: false,
+  });
 });

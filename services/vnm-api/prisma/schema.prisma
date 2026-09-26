@@ -26,6 +26,8 @@ model Title {
   createdAt         DateTime      @default(now())
   updatedAt         DateTime      @updatedAt
   archiveItems      ArchiveItem[]
+  browserRuntime    BrowserRuntime?
+  webRequests       WebRequest[]
 }
 
 model ArchiveItem {
@@ -38,6 +40,7 @@ model ArchiveItem {
   updatedAt       DateTime @updatedAt
   title           Title    @relation(fields: [titleId], references: [id], onDelete: Restrict)
   game            Game?
+  browserRuntimes BrowserRuntime[]
 
   @@index([titleId])
 }
@@ -86,6 +89,7 @@ model User {
   createdAt    DateTime       @default(now())
   updatedAt    DateTime       @updatedAt
   favorites    UserFavorite[]
+  webRequests  WebRequest[]
 }
 
 model UserFavorite {
@@ -96,6 +100,38 @@ model UserFavorite {
   game      Game     @relation(fields: [gameId], references: [id], onDelete: Cascade)
 
   @@id([userId, gameId])
+}
+
+// ── Browser runtime workflow (state/workflow only; no Kasm/Docker yet) ──────
+// One row per logical Title. Absence of the row means ARCHIVE_ONLY; the API
+// still exposes ARCHIVE_ONLY explicitly. `archiveItemId` records the release a
+// future curated golden runtime would be built from — never an implicit primary.
+model BrowserRuntime {
+  id            String       @id @default(uuid())
+  titleId       String       @unique
+  state         String       @default("REQUESTED") // REQUESTED|PREPARING|TESTING|READY|BROKEN|UNSUPPORTED
+  archiveItemId String?
+  note          String?
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+  title         Title        @relation(fields: [titleId], references: [id], onDelete: Cascade)
+  archiveItem   ArchiveItem? @relation(fields: [archiveItemId], references: [id], onDelete: SetNull)
+
+  @@index([archiveItemId])
+}
+
+// User request for a Title's browser version. One active row per user/title.
+model WebRequest {
+  id        String   @id @default(uuid())
+  titleId   String
+  userId    String
+  createdAt DateTime @default(now())
+  title     Title    @relation(fields: [titleId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([titleId, userId])
+  @@index([titleId])
+  @@index([userId])
 }
 
 model BuildJob {
